@@ -234,6 +234,11 @@ def send_scheduled_task(chat_id):
 
 # 🌍 Webhook сервер для Render
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -248,9 +253,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+# сервер с allow_reuse_address
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 def start_web_server():
     port = int(os.getenv("PORT", 10000))
-    with socketserver.TCPServer(("", port), Handler) as httpd:
+    with ReusableTCPServer(("", port), Handler) as httpd:
         print(f"✅ Webhook server running on port {port}")
         httpd.serve_forever()
 
