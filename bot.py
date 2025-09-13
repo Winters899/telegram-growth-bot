@@ -223,12 +223,6 @@ def handle_inline_buttons(call):
             reply_markup=get_inline_keyboard(chat_id)
         )
 
-# 🎯 Глобальный обработчик ошибок
-@bot.error_handler(func=lambda e: True)
-def handle_bot_errors(exception):
-    logging.error(f"❌ Ошибка Telebot: {exception}")
-    return True
-
 # ⏰ Планировщик (только подписчикам)
 def schedule_checker():
     while True:
@@ -274,7 +268,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 user = update.callback_query.from_user
                 logging.info(f"🔘 Callback от @{user.username or user.id}: {update.callback_query.data}")
 
-            bot.process_new_updates([update])
+            # 🔄 Обработка апдейта с try/except
+            try:
+                bot.process_new_updates([update])
+            except Exception as e:
+                logging.error(f"❌ Ошибка при обработке апдейта: {e}")
 
             self.send_response(200)
             self.end_headers()
