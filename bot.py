@@ -196,7 +196,7 @@ def handle_inline_buttons(call):
         ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
         bot.send_message(
             call.message.chat.id,
-            f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text} ",
+            f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text}",
             reply_markup=get_inline_keyboard(chat_id)
         )
 
@@ -222,6 +222,12 @@ def handle_inline_buttons(call):
             "🎯 Выполняя задания подряд, ты будешь получать достижения!",
             reply_markup=get_inline_keyboard(chat_id)
         )
+
+# 🎯 Глобальный обработчик ошибок
+@bot.error_handler(func=lambda e: True)
+def handle_bot_errors(exception):
+    logging.error(f"❌ Ошибка Telebot: {exception}")
+    return True
 
 # ⏰ Планировщик (только подписчикам)
 def schedule_checker():
@@ -259,7 +265,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers['content-length'])
             body = self.rfile.read(length)
             update = telebot.types.Update.de_json(body.decode("utf-8"))
+
+            # 📝 Логируем апдейты
+            if update.message:
+                user = update.message.from_user
+                logging.info(f"📩 Сообщение от @{user.username or user.id}: {update.message.text}")
+            elif update.callback_query:
+                user = update.callback_query.from_user
+                logging.info(f"🔘 Callback от @{user.username or user.id}: {update.callback_query.data}")
+
             bot.process_new_updates([update])
+
             self.send_response(200)
             self.end_headers()
         else:
