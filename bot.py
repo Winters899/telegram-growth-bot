@@ -4,6 +4,8 @@ import telebot
 import schedule
 import time
 import threading
+import http.server
+import socketserver
 from telebot import types
 from datetime import datetime, timedelta
 
@@ -14,7 +16,7 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN)
 
-# 📚 30-дневная программа от лучших тренеров
+# 📚 30-дневная программа
 tasks = [
     # Неделя 1
     "День 1: Определи 10 ключевых целей на ближайший год.",
@@ -70,7 +72,7 @@ def save_progress():
 
 user_progress = load_progress()
 
-# 🏆 Достижения (ключ=дни, значение=текст с эмодзи)
+# 🏆 Достижения
 ACHIEVEMENTS = {
     5: "🏅 Молодец! 5 дней подряд!",
     10: "🥈 Ты машина! 10 дней без перерыва!",
@@ -124,7 +126,7 @@ def next_task(chat_id):
         if last_done and today == last_done + timedelta(days=1):
             user_progress[chat_id]["streak"] += 1
         elif last_done == today:
-            pass  # Пользователь уже отмечал сегодня — не увеличиваем день дважды
+            pass
         else:
             user_progress[chat_id]["streak"] = 1
     else:
@@ -186,10 +188,7 @@ def handle_inline_buttons(call):
         bot.answer_callback_query(call.id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
-        ach_list = []
-        for x in user_progress[chat_id]["achievements"]:
-            if x in ACHIEVEMENTS:
-                ach_list.append(ACHIEVEMENTS[x].split(" ")[0])
+        ach_list = [ACHIEVEMENTS[x].split(" ")[0] for x in user_progress[chat_id]["achievements"] if x in ACHIEVEMENTS]
         ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
         bot.send_message(
             call.message.chat.id,
@@ -207,16 +206,16 @@ def handle_inline_buttons(call):
         bot.answer_callback_query(call.id)
         bot.send_message(
             call.message.chat.id,
-            "ℹ Я помогаю пройти 30‑дневную программу совершенствования:\n"
+            "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
             "📅 — показать задание на сегодня\n"
             "✅ — отметить выполнение и перейти к следующему дню\n"
             "📊 — показать статистику\n"
             "🔔 — включить ежедневные напоминания в 09:00\n\n"
-            "🎯 Выполняя задания подряд, ты будешь получать достижения и эмодзи‑медали!",
+            "🎯 Выполняя задания подряд, ты будешь получать достижения и эмодзи-медали!",
             reply_markup=get_inline_keyboard()
         )
 
-# ⏰ Функция планировщика для одного chat_id
+# ⏰ Планировщик
 def schedule_checker(chat_id):
     schedule.every().day.at("09:00").do(lambda: send_scheduled_task(chat_id))
     while True:
@@ -235,8 +234,27 @@ def send_scheduled_task(chat_id):
     except Exception as e:
         print(f"Error in scheduled task for {chat_id}: {e}")
 
-# ▶️ Запуск бота
+# 🌐 HTTP-сервер с healthcheck
+class HealthHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/ping":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_web_server():
+    port = int(os.getenv("PORT", 10000))
+    with socketserver.TCPServer(("", port), HealthHandler) as httpd:
+        print(f"✅ Web server running on port {port}")
+        httpd.serve_forever()
+
+# ▶️ Запуск бота и сервера
 if __name__ == '__main__':
+    threading.Thread(target=start_web_server, daemon=True).start()
     try:
         bot.polling(non_stop=True)
     except KeyboardInterrupt:
