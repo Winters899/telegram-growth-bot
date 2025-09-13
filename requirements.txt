@@ -1,2 +1,2 @@
-pyTelegramBotAPI
-schedule
+pyTelegramBotAPI==4.23.0
+schedule==1.2.2
