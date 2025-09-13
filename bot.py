@@ -196,7 +196,7 @@ def handle_inline_buttons(call):
         ach_list = []
         for x in user_progress[chat_id]["achievements"]:
             if x in ACHIEVEMENTS:
-                ach_list.append(ACHIEVEMENTS[x].split(\" \")[0])
+                ach_list.append(ACHIEVEMENTS[x].split(" ")[0])
         ach_text = \"🎯 Достижения: \" + (\" \".join(ach_list) if ach_list else \"пока нет\")
         bot.send_message(
             call.message.chat.id,
