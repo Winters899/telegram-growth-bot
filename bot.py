@@ -96,8 +96,7 @@ def get_task(chat_id):
     day = user_progress[chat_id]["day"]
     if day < len(tasks):
         return tasks[day]
-    else:
-        return "🎉 Программа завершена! Ты прошёл 30 дней 🚀"
+    return "🎉 Программа завершена! Ты прошёл 30 дней 🚀"
 
 # 🎯 Проверка достижений
 def check_achievements(chat_id):
@@ -116,7 +115,6 @@ def check_achievements(chat_id):
 def next_task(chat_id):
     chat_id = str(chat_id)
     today = datetime.now().date()
-
     last_done_str = user_progress[chat_id].get("last_done", "")
     if last_done_str:
         try:
@@ -126,19 +124,16 @@ def next_task(chat_id):
         if last_done and today == last_done + timedelta(days=1):
             user_progress[chat_id]["streak"] += 1
         elif last_done == today:
-            # пользователь уже отмечал сегодня — не увеличиваем день дважды
-            pass
+            pass  # Пользователь уже отмечал сегодня — не увеличиваем день дважды
         else:
             user_progress[chat_id]["streak"] = 1
     else:
         user_progress[chat_id]["streak"] = 1
 
     user_progress[chat_id]["last_done"] = str(today)
-    # Переходим к следующему дню (если ещё есть)
     if user_progress[chat_id]["day"] < len(tasks):
         user_progress[chat_id]["day"] += 1
     save_progress()
-
     return get_task(chat_id), check_achievements(chat_id)
 
 # 🖲 Inline-кнопки
@@ -182,32 +177,29 @@ def handle_inline_buttons(call):
         task, achievements = next_task(chat_id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
-        text = f"➡ Следующее задание:\\n{task}\\n\\n🔥 Серия: {streak} дней\\n📅 День {day}/{len(tasks)}"
+        text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {streak} дней\n📅 День {day}/{len(tasks)}"
         bot.send_message(call.message.chat.id, text, reply_markup=get_inline_keyboard())
         for ach in achievements:
-            # при получении достижения отправляем дополнительное сообщение
             bot.send_message(call.message.chat.id, f"🎉 {ach}")
 
     elif data == "stats":
         bot.answer_callback_query(call.id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
-        # отображаем эмодзи медалей
         ach_list = []
         for x in user_progress[chat_id]["achievements"]:
             if x in ACHIEVEMENTS:
                 ach_list.append(ACHIEVEMENTS[x].split(" ")[0])
-        ach_text = \"🎯 Достижения: \" + (\" \".join(ach_list) if ach_list else \"пока нет\")
+        ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
         bot.send_message(
             call.message.chat.id,
-            f\"📊 Статистика:\\n📅 День: {day}/{len(tasks)}\\n🔥 Серия: {streak} дней подряд\\n{ach_text}\",
+            f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text}",
             reply_markup=get_inline_keyboard()
         )
 
     elif data == "subscribe":
         bot.answer_callback_query(call.id)
         init_user(chat_id)
-        # запускаем фоновой поток для отправки ежедневных напоминаний конкретному пользователю
         threading.Thread(target=schedule_checker, args=(int(chat_id),), daemon=True).start()
         bot.send_message(call.message.chat.id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard())
 
@@ -215,40 +207,37 @@ def handle_inline_buttons(call):
         bot.answer_callback_query(call.id)
         bot.send_message(
             call.message.chat.id,
-            "ℹ Я помогаю пройти 30‑дневную программу совершенствования:\\n"
-            "📅 — показать задание на сегодня\\n"
-            "✅ — отметить выполнение и перейти к следующему дню\\n"
-            "📊 — показать статистику\\n"
-            "🔔 — включить ежедневные напоминания в 09:00\\n\\n"
+            "ℹ Я помогаю пройти 30‑дневную программу совершенствования:\n"
+            "📅 — показать задание на сегодня\n"
+            "✅ — отметить выполнение и перейти к следующему дню\n"
+            "📊 — показать статистику\n"
+            "🔔 — включить ежедневные напоминания в 09:00\n\n"
             "🎯 Выполняя задания подряд, ты будешь получать достижения и эмодзи‑медали!",
             reply_markup=get_inline_keyboard()
         )
 
 # ⏰ Функция планировщика для одного chat_id
 def schedule_checker(chat_id):
-    # Используем локальное планирование: каждый день в 09:00 отправляем следующее задание
     schedule.every().day.at("09:00").do(lambda: send_scheduled_task(chat_id))
     while True:
         schedule.run_pending()
         time.sleep(30)
 
 def send_scheduled_task(chat_id):
-    # безопасно вызываем next_task и отправляем сообщение
     try:
         task, achievements = next_task(chat_id)
-        streak = user_progress[str(chat_id)][\"streak\"]
-        day = user_progress[str(chat_id)][\"day\"]
-        text = f\"📌 Автоматическое напоминание:\\n{task}\\n\\n🔥 Серия: {streak} дней\\n📅 День {day}/{len(tasks)}\"
+        streak = user_progress[str(chat_id)]["streak"]
+        day = user_progress[str(chat_id)]["day"]
+        text = f"📌 Автоматическое напоминание:\n{task}\n\n🔥 Серия: {streak} дней\n📅 День {day}/{len(tasks)}"
         bot.send_message(chat_id, text, reply_markup=get_inline_keyboard())
         for ach in achievements:
-            bot.send_message(chat_id, f\"🎉 {ach}\")
+            bot.send_message(chat_id, f"🎉 {ach}")
     except Exception as e:
-        # логируем в stdout
-        print(\"Error in scheduled task:\", e)
+        print(f"Error in scheduled task for {chat_id}: {e}")
 
 # ▶️ Запуск бота
 if __name__ == '__main__':
     try:
         bot.polling(non_stop=True)
     except KeyboardInterrupt:
-        print(\"Stopping bot...\")
+        print("Stopping bot...")
