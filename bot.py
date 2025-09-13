@@ -4,24 +4,26 @@ import telebot
 import schedule
 import time
 import threading
+import logging
 from telebot import types
 from datetime import datetime, timedelta
 import http.server
 import socketserver
 
-# 🔑 Токен из Render переменных окружения
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables.")
+# 🔑 Логирование
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# 🔑 Токен
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in environment variables.")
 bot = telebot.TeleBot(TOKEN)
 
-# 🌍 Домен Render (нужен для webhook)
+# 🌍 Render hostname (для вебхука)
 HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if not HOSTNAME:
-    raise RuntimeError("RENDER_EXTERNAL_HOSTNAME is not set (Render автоматически задаёт).")
-
-WEBHOOK_URL = f"https://{HOSTNAME}/"
+    raise RuntimeError("RENDER_EXTERNAL_HOSTNAME is not set.")
+WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
 
 # 📚 30-дневная программа
 tasks = [
@@ -57,23 +59,25 @@ tasks = [
     "День 30: Создай карту жизни."
 ]
 
-# 📂 Файл прогресса
+# 📂 Файлы прогресса и подписок
 PROGRESS_FILE = "progress.json"
+SUBSCRIBERS_FILE = "subscribers.json"
 
-def load_progress():
-    if os.path.exists(PROGRESS_FILE):
+def load_json(filename):
+    if os.path.exists(filename):
         try:
-            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
     return {}
 
-def save_progress():
-    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_progress, f, ensure_ascii=False, indent=2)
+def save_json(filename, data):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-user_progress = load_progress()
+user_progress = load_json(PROGRESS_FILE)
+subscribers = load_json(SUBSCRIBERS_FILE)
 
 # 🏆 Достижения
 ACHIEVEMENTS = {
@@ -87,13 +91,8 @@ ACHIEVEMENTS = {
 def init_user(chat_id):
     chat_id = str(chat_id)
     if chat_id not in user_progress:
-        user_progress[chat_id] = {
-            "day": 0,
-            "streak": 0,
-            "last_done": "",
-            "achievements": []
-        }
-        save_progress()
+        user_progress[chat_id] = {"day": 0, "streak": 0, "last_done": "", "achievements": []}
+        save_json(PROGRESS_FILE, user_progress)
 
 # 🔄 Получить задание
 def get_task(chat_id):
@@ -113,10 +112,10 @@ def check_achievements(chat_id):
             user_progress[chat_id]["achievements"].append(threshold)
             unlocked.append(text)
     if unlocked:
-        save_progress()
+        save_json(PROGRESS_FILE, user_progress)
     return unlocked
 
-# ⏩ Выполнение и переход к следующему
+# ⏩ Следующее задание
 def next_task(chat_id):
     chat_id = str(chat_id)
     today = datetime.now().date()
@@ -138,16 +137,20 @@ def next_task(chat_id):
     user_progress[chat_id]["last_done"] = str(today)
     if user_progress[chat_id]["day"] < len(tasks):
         user_progress[chat_id]["day"] += 1
-    save_progress()
+    save_json(PROGRESS_FILE, user_progress)
     return get_task(chat_id), check_achievements(chat_id)
 
 # 🖲 Кнопки
-def get_inline_keyboard():
+def get_inline_keyboard(chat_id):
+    subscribed = str(chat_id) in subscribers
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton("📅 Сегодняшнее задание", callback_data="today"))
     keyboard.add(types.InlineKeyboardButton("✅ Выполнено → Следующее", callback_data="next"))
-    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-                 types.InlineKeyboardButton("🔔 Подписаться (09:00)", callback_data="subscribe"))
+    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+    if subscribed:
+        keyboard.add(types.InlineKeyboardButton("❌ Отписаться", callback_data="unsubscribe"))
+    else:
+        keyboard.add(types.InlineKeyboardButton("🔔 Подписаться (09:00)", callback_data="subscribe"))
     keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
     return keyboard
 
@@ -159,7 +162,7 @@ def start(message):
         message.chat.id,
         "Привет 👋 Я твой наставник на 30-дневном пути развития!\n\n"
         "Нажимай кнопки ниже, чтобы получать задания и отмечать выполнение.",
-        reply_markup=get_inline_keyboard()
+        reply_markup=get_inline_keyboard(message.chat.id)
     )
 
 # 🎛 Обработка кнопок
@@ -172,17 +175,17 @@ def handle_inline_buttons(call):
     try:
         bot.answer_callback_query(call.id)
     except Exception as e:
-        print(f"Callback error: {e}")
+        logging.warning(f"Callback error: {e}")
 
     if data == "today":
-        bot.send_message(call.message.chat.id, f"📌 Сегодня: {get_task(chat_id)}", reply_markup=get_inline_keyboard())
+        bot.send_message(call.message.chat.id, f"📌 Сегодня: {get_task(chat_id)}", reply_markup=get_inline_keyboard(chat_id))
 
     elif data == "next":
         task, achievements = next_task(chat_id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
         text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {streak} дней\n📅 День {day}/{len(tasks)}"
-        bot.send_message(call.message.chat.id, text, reply_markup=get_inline_keyboard())
+        bot.send_message(call.message.chat.id, text, reply_markup=get_inline_keyboard(chat_id))
         for ach in achievements:
             bot.send_message(call.message.chat.id, f"🎉 {ach}")
 
@@ -194,12 +197,19 @@ def handle_inline_buttons(call):
         bot.send_message(
             call.message.chat.id,
             f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text}",
-            reply_markup=get_inline_keyboard()
+            reply_markup=get_inline_keyboard(chat_id)
         )
 
     elif data == "subscribe":
-        threading.Thread(target=schedule_checker, args=(int(chat_id),), daemon=True).start()
-        bot.send_message(call.message.chat.id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard())
+        subscribers[chat_id] = True
+        save_json(SUBSCRIBERS_FILE, subscribers)
+        bot.send_message(call.message.chat.id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard(chat_id))
+
+    elif data == "unsubscribe":
+        if chat_id in subscribers:
+            del subscribers[chat_id]
+            save_json(SUBSCRIBERS_FILE, subscribers)
+        bot.send_message(call.message.chat.id, "❌ Ты отписался от напоминаний.", reply_markup=get_inline_keyboard(chat_id))
 
     elif data == "help":
         bot.send_message(
@@ -208,37 +218,32 @@ def handle_inline_buttons(call):
             "📅 — показать задание на сегодня\n"
             "✅ — отметить выполнение\n"
             "📊 — статистика\n"
-            "🔔 — напоминания в 09:00\n\n"
+            "🔔 — подписка на напоминания (09:00)\n\n"
             "🎯 Выполняя задания подряд, ты будешь получать достижения!",
-            reply_markup=get_inline_keyboard()
+            reply_markup=get_inline_keyboard(chat_id)
         )
 
-# ⏰ Планировщик
-def schedule_checker(chat_id):
-    schedule.every().day.at("09:00").do(lambda: send_scheduled_task(chat_id))
+# ⏰ Планировщик (только подписчикам)
+def schedule_checker():
     while True:
         schedule.run_pending()
         time.sleep(30)
 
-def send_scheduled_task(chat_id):
-    try:
-        task, achievements = next_task(chat_id)
-        streak = user_progress[str(chat_id)]["streak"]
-        day = user_progress[str(chat_id)]["day"]
-        text = f"📌 Автоматическое напоминание:\n{task}\n\n🔥 Серия: {streak} дней\n📅 День {day}/{len(tasks)}"
-        bot.send_message(chat_id, text, reply_markup=get_inline_keyboard())
-        for ach in achievements:
-            bot.send_message(chat_id, f"🎉 {ach}")
-    except Exception as e:
-        print(f"Error in scheduled task for {chat_id}: {e}")
+def send_scheduled_task():
+    for chat_id in list(subscribers.keys()):
+        try:
+            task, achievements = next_task(chat_id)
+            streak = user_progress[str(chat_id)]["streak"]
+            day = user_progress[str(chat_id)]["day"]
+            text = f"📌 Автоматическое напоминание:\n{task}\n\n🔥 Серия: {streak} дней\n📅 День {day}/{len(tasks)}"
+            bot.send_message(int(chat_id), text, reply_markup=get_inline_keyboard(chat_id))
+            for ach in achievements:
+                bot.send_message(int(chat_id), f"🎉 {ach}")
+        except Exception as e:
+            logging.error(f"Error in scheduled task for {chat_id}: {e}")
 
-# 🌍 Webhook сервер для Render
+# 🌍 Webhook сервер
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -246,29 +251,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def do_POST(self):
-        length = int(self.headers['content-length'])
-        body = self.rfile.read(length)
-        update = telebot.types.Update.de_json(body.decode("utf-8"))
-        bot.process_new_updates([update])
-        self.send_response(200)
-        self.end_headers()
+        if self.path == "/webhook":
+            length = int(self.headers['content-length'])
+            body = self.rfile.read(length)
+            update = telebot.types.Update.de_json(body.decode("utf-8"))
+            bot.process_new_updates([update])
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-# сервер с allow_reuse_address
 class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 def start_web_server():
     port = int(os.getenv("PORT", 10000))
     with ReusableTCPServer(("", port), Handler) as httpd:
-        print(f"✅ Webhook server running on port {port}")
+        logging.info(f"✅ Webhook server running on port {port}")
         httpd.serve_forever()
 
 # ▶️ Запуск
 if __name__ == '__main__':
-    # Настраиваем webhook
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL)
-    print(f"🔗 Webhook установлен: {WEBHOOK_URL}")
+    logging.info(f"🔗 Webhook установлен: {WEBHOOK_URL}")
 
-    # Запуск сервера
+    schedule.every().day.at("09:00").do(send_scheduled_task)
+    threading.Thread(target=schedule_checker, daemon=True).start()
+
     start_web_server()
