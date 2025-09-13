@@ -4,10 +4,10 @@ import telebot
 import schedule
 import time
 import threading
-import http.server
-import socketserver
 from telebot import types
 from datetime import datetime, timedelta
+import http.server
+import socketserver
 
 # 🔑 Получаем токен из переменных окружения (Render)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,7 +18,6 @@ bot = telebot.TeleBot(TOKEN)
 
 # 📚 30-дневная программа
 tasks = [
-    # Неделя 1
     "День 1: Определи 10 ключевых целей на ближайший год.",
     "День 2: Составь утренний ритуал (вода, зарядка, визуализация).",
     "День 3: Откажись от одной вредной привычки.",
@@ -26,7 +25,6 @@ tasks = [
     "День 5: Составь список из 10 сильных сторон.",
     "День 6: Сделай цифровой детокс на 6 часов.",
     "День 7: Подведи итоги недели, отметь победы.",
-    # Неделя 2
     "День 8: Применяй правило Парето 20/80.",
     "День 9: Определи 3 главные приоритеты дня.",
     "День 10: Используй технику Pomodoro (25/5).",
@@ -34,7 +32,6 @@ tasks = [
     "День 12: Минимизируй отвлекающие факторы (уведомления, вкладки).",
     "День 13: Сделай 2 часа глубокой работы без отвлечений.",
     "День 14: Итоги недели: оцени продуктивность.",
-    # Неделя 3
     "День 15: Напиши свою миссию и ценности.",
     "День 16: Практикуй публичные мини-выступления (или запись на камеру).",
     "День 17: Научись говорить «нет» — установи границы.",
@@ -42,7 +39,6 @@ tasks = [
     "День 19: Сделай доброе дело (помоги или поддержи).",
     "День 20: Визуализируй идеальную версию себя через 5 лет.",
     "День 21: Итоги недели: оцени уверенность и влияние.",
-    # Неделя 4
     "День 22: Составь план учёбы на 1 год (книги, курсы, навыки).",
     "День 23: Определи наставника или источник вдохновения.",
     "День 24: Практикуй вечерний анализ дня (рефлексия).",
@@ -54,7 +50,7 @@ tasks = [
     "День 30: Создай карту жизни с целями и стратегией."
 ]
 
-# 📂 Файл для прогресса
+# 📂 Файл прогресса
 PROGRESS_FILE = "progress.json"
 
 def load_progress():
@@ -92,7 +88,7 @@ def init_user(chat_id):
         }
         save_progress()
 
-# 🔄 Получить задание для пользователя
+# 🔄 Получить задание
 def get_task(chat_id):
     chat_id = str(chat_id)
     day = user_progress[chat_id]["day"]
@@ -113,7 +109,7 @@ def check_achievements(chat_id):
         save_progress()
     return unlocked
 
-# ⏩ Отметить выполнение и перейти к следующему заданию
+# ⏩ Выполнение и переход к следующему
 def next_task(chat_id):
     chat_id = str(chat_id)
     today = datetime.now().date()
@@ -138,18 +134,14 @@ def next_task(chat_id):
     save_progress()
     return get_task(chat_id), check_achievements(chat_id)
 
-# 🖲 Inline-кнопки
+# 🖲 Кнопки
 def get_inline_keyboard():
     keyboard = types.InlineKeyboardMarkup()
-    btn_today = types.InlineKeyboardButton("📅 Сегодняшнее задание", callback_data="today")
-    btn_done = types.InlineKeyboardButton("✅ Выполнено → Следующее", callback_data="next")
-    btn_stats = types.InlineKeyboardButton("📊 Статистика", callback_data="stats")
-    btn_sub = types.InlineKeyboardButton("🔔 Подписаться (09:00)", callback_data="subscribe")
-    btn_help = types.InlineKeyboardButton("ℹ Помощь", callback_data="help")
-    keyboard.add(btn_today)
-    keyboard.add(btn_done)
-    keyboard.add(btn_stats, btn_sub)
-    keyboard.add(btn_help)
+    keyboard.add(types.InlineKeyboardButton("📅 Сегодняшнее задание", callback_data="today"))
+    keyboard.add(types.InlineKeyboardButton("✅ Выполнено → Следующее", callback_data="next"))
+    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+                 types.InlineKeyboardButton("🔔 Подписаться (09:00)", callback_data="subscribe"))
+    keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
     return keyboard
 
 # 🚀 /start
@@ -163,19 +155,22 @@ def start(message):
         reply_markup=get_inline_keyboard()
     )
 
-# 🎛 Обработка inline-кнопок
+# 🎛 Обработка кнопок
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline_buttons(call):
     chat_id = str(call.message.chat.id)
     init_user(chat_id)
     data = call.data
 
-    if data == "today":
+    try:
         bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Callback error: {e}")
+
+    if data == "today":
         bot.send_message(call.message.chat.id, f"📌 Сегодня: {get_task(chat_id)}", reply_markup=get_inline_keyboard())
 
     elif data == "next":
-        bot.answer_callback_query(call.id)
         task, achievements = next_task(chat_id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
@@ -185,7 +180,6 @@ def handle_inline_buttons(call):
             bot.send_message(call.message.chat.id, f"🎉 {ach}")
 
     elif data == "stats":
-        bot.answer_callback_query(call.id)
         streak = user_progress[chat_id]["streak"]
         day = user_progress[chat_id]["day"]
         ach_list = [ACHIEVEMENTS[x].split(" ")[0] for x in user_progress[chat_id]["achievements"] if x in ACHIEVEMENTS]
@@ -197,13 +191,10 @@ def handle_inline_buttons(call):
         )
 
     elif data == "subscribe":
-        bot.answer_callback_query(call.id)
-        init_user(chat_id)
         threading.Thread(target=schedule_checker, args=(int(chat_id),), daemon=True).start()
         bot.send_message(call.message.chat.id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard())
 
     elif data == "help":
-        bot.answer_callback_query(call.id)
         bot.send_message(
             call.message.chat.id,
             "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
@@ -234,25 +225,21 @@ def send_scheduled_task(chat_id):
     except Exception as e:
         print(f"Error in scheduled task for {chat_id}: {e}")
 
-# 🌐 HTTP-сервер с healthcheck
-class HealthHandler(http.server.SimpleHTTPRequestHandler):
+# 🌍 Веб-сервер для Render
+class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/ping":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
 
 def start_web_server():
     port = int(os.getenv("PORT", 10000))
-    with socketserver.TCPServer(("", port), HealthHandler) as httpd:
+    with socketserver.TCPServer(("", port), Handler) as httpd:
         print(f"✅ Web server running on port {port}")
         httpd.serve_forever()
 
-# ▶️ Запуск бота и сервера
+# ▶️ Запуск
 if __name__ == '__main__':
     threading.Thread(target=start_web_server, daemon=True).start()
     try:
