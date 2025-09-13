@@ -10,6 +10,19 @@ from datetime import datetime, timedelta
 import http.server
 import socketserver
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class WebhookHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Hello, I am alive!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+
 # 🔑 Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
