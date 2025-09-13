@@ -10,19 +10,6 @@ from datetime import datetime, timedelta
 import http.server
 import socketserver
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Hello, I am alive!")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-
 # 🔑 Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -209,7 +196,7 @@ def handle_inline_buttons(call):
         ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
         bot.send_message(
             call.message.chat.id,
-            f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text}",
+            f"📊 Статистика:\n📅 День: {day}/{len(tasks)}\n🔥 Серия: {streak} дней подряд\n{ach_text} ",
             reply_markup=get_inline_keyboard(chat_id)
         )
 
@@ -257,11 +244,15 @@ def send_scheduled_task():
 
 # 🌍 Webhook сервер
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"Hello, I am alive!")
 
     def do_POST(self):
         if self.path == "/webhook":
