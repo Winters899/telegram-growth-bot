@@ -65,10 +65,10 @@ TASKS = [
 
 # 🏆 Достижения
 ACHIEVEMENTS = {
-    5: "🏅 Молод Communal! 5 days in a row!",
-    10: "🥈 You're unstoppable! 10 days in a row!",
-    20: "🥇 Iron will! 20 days in a row!",
-    30: "👑 Challenge Hero! 30 days!"
+    5: "🏅 Молодец! 5 дней подряд!",
+    10: "🥈 Ты машина! 10 дней без перерыва!",
+    20: "🥇 Железная сила воли! 20 дней подряд!",
+    30: "👑 Герой челленджа! 30 дней!"
 }
 
 # 📦 Подключение к БД
@@ -91,7 +91,8 @@ def init_db():
         achievements TEXT[] DEFAULT '{}',
         subscribed BOOLEAN DEFAULT FALSE,
         username TEXT,
-        last_message_id BIGINT
+        last_message_id BIGINT,
+        last_command_time TIMESTAMP
     );
     """)
     conn.commit()
@@ -197,6 +198,12 @@ def get_inline_keyboard(user):
 # 🗑 Функция для отправки сообщений с удалением предыдущего
 def send_message_with_cleanup(chat_id, text, reply_markup=None):
     user = get_user(chat_id)
+    # Проверяем время последнего действия
+    if user and user['last_command_time']:
+        last_time = user['last_command_time']
+        if (datetime.now() - last_time).total_seconds() < 2:  # Задержка 2 секунды
+            logging.info(f"Skipping message for {chat_id}: too frequent")
+            return
     # Удаляем предыдущее сообщение, если есть
     if user and user['last_message_id']:
         try:
@@ -204,9 +211,12 @@ def send_message_with_cleanup(chat_id, text, reply_markup=None):
         except Exception as e:
             logging.warning(f"Failed to delete message {user['last_message_id']}: {e}")
     # Отправляем новое сообщение
-    message = bot.send_message(chat_id, text, reply_markup=reply_markup)
-    # Сохраняем ID нового сообщения
-    update_user(chat_id, last_message_id=message.message_id)
+    try:
+        message = bot.send_message(chat_id, text, reply_markup=reply_markup)
+        # Сохраняем ID нового сообщения и время команды
+        update_user(chat_id, last_message_id=message.message_id, last_command_time=datetime.now())
+    except Exception as e:
+        logging.error(f"Failed to send message to {chat_id}: {e}")
 
 # 🚀 /start
 @bot.message_handler(commands=['start'])
@@ -381,6 +391,7 @@ def start_web_server():
 # ▶️ Запуск
 if __name__ == '__main__':
     bot.remove_webhook()
+    time.sleep(1)  # Задержка для стабильного удаления вебхука
     bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"🔗 Webhook установлен: {WEBHOOK_URL}")
 
