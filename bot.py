@@ -170,17 +170,27 @@ def next_task(user):
 
 # 🖲 Кнопки
 def get_inline_keyboard(user):
-    keyboard = types.InlineKeyboardMarkup(row_width=1)  # Одна кнопка на ряд
-    keyboard.add(types.InlineKeyboardButton("📅 Сегодня", callback_data="today"))
-    keyboard.add(types.InlineKeyboardButton("✅ Выполнено", callback_data="next"))
-    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+    keyboard = types.InlineKeyboardMarkup(row_width=2)  # Две кнопки в строке
+    buttons = [
+        ("📅 Сегодня", "today"),
+        ("✅ Выполнено", "next"),
+        ("📊 Статистика", "stats"),
+        ("ℹ Помощь", "help"),
+        ("❌ Отписаться" if user['subscribed'] else "🔔 Подписаться", "unsubscribe" if user['subscribed'] else "subscribe")
+    ]
+    # Первые четыре кнопки по парам
     keyboard.add(
-        types.InlineKeyboardButton(
-            "❌ Отписаться" if user['subscribed'] else "🔔 Подписаться (09:00)",
-            callback_data="unsubscribe" if user['subscribed'] else "subscribe"
-        )
+        types.InlineKeyboardButton(buttons[0][0].ljust(12, '\u00A0'), callback_data=buttons[0][1]),
+        types.InlineKeyboardButton(buttons[1][0].ljust(12, '\u00A0'), callback_data=buttons[1][1])
     )
-    keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
+    keyboard.add(
+        types.InlineKeyboardButton(buttons[2][0].ljust(12, '\u00A0'), callback_data=buttons[2][1]),
+        types.InlineKeyboardButton(buttons[3][0].ljust(12, '\u00A0'), callback_data=buttons[3][1])
+    )
+    # Кнопка подписки/отписки отдельно
+    keyboard.add(
+        types.InlineKeyboardButton(buttons[4][0].ljust(12, '\u00A0'), callback_data=buttons[4][1])
+    )
     return keyboard
 
 # 🚀 /start
