@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 # 🔑 Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# 🔑 Токен
+# 🔑 Токен ключ для телеги, хранится в рендере
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables.")
