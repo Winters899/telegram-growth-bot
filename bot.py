@@ -90,9 +90,7 @@ def init_db():
         last_done DATE,
         achievements TEXT[] DEFAULT '{}',
         subscribed BOOLEAN DEFAULT FALSE,
-        username TEXT,
-        last_message_id BIGINT,
-        last_command_time TIMESTAMP
+        username TEXT
     );
     """)
     conn.commit()
@@ -195,35 +193,12 @@ def get_inline_keyboard(user):
     )
     return keyboard
 
-# 🗑 Функция для отправки сообщений с удалением предыдущего
-def send_message_with_cleanup(chat_id, text, reply_markup=None):
-    user = get_user(chat_id)
-    # Проверяем время последнего действия
-    if user and user['last_command_time']:
-        last_time = user['last_command_time']
-        if (datetime.now() - last_time).total_seconds() < 2:  # Задержка 2 секунды
-            logging.info(f"Skipping message for {chat_id}: too frequent")
-            return
-    # Удаляем предыдущее сообщение, если есть
-    if user and user['last_message_id']:
-        try:
-            bot.delete_message(chat_id, user['last_message_id'])
-        except Exception as e:
-            logging.warning(f"Failed to delete message {user['last_message_id']}: {e}")
-    # Отправляем новое сообщение
-    try:
-        message = bot.send_message(chat_id, text, reply_markup=reply_markup)
-        # Сохраняем ID нового сообщения и время команды
-        update_user(chat_id, last_message_id=message.message_id, last_command_time=datetime.now())
-    except Exception as e:
-        logging.error(f"Failed to send message to {chat_id}: {e}")
-
 # 🚀 /start
 @bot.message_handler(commands=['start'])
 def start(message):
     init_user(message.chat.id, message.from_user.username)
     user = get_user(message.chat.id)
-    send_message_with_cleanup(
+    bot.send_message(
         message.chat.id,
         "Привет 👋 Я твой наставник на 30-дневном пути развития!\n\n"
         "Нажимай кнопки ниже, чтобы получать задания и отмечать выполнение.",
@@ -236,7 +211,7 @@ def stats(message):
     user = get_user(message.chat.id)
     ach_list = [ACHIEVEMENTS[int(x)].split(" ")[0] for x in (user['achievements'] or []) if int(x) in ACHIEVEMENTS]
     ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
-    send_message_with_cleanup(
+    bot.send_message(
         message.chat.id,
         f"📊 Статистика:\n📅 День: {user['day']}/{len(TASKS)}\n🔥 Серия: {user['streak']} дней подряд\n{ach_text}",
         reply_markup=get_inline_keyboard(user)
@@ -246,7 +221,7 @@ def stats(message):
 @bot.message_handler(commands=['all_stats'])
 def all_stats(message):
     if str(message.chat.id) != str(ADMIN_ID):
-        send_message_with_cleanup(message.chat.id, "🚫 Команда доступна только администратору.")
+        bot.send_message(message.chat.id, "🚫 Команда доступна только администратору.")
         return
 
     conn = get_db()
@@ -257,14 +232,14 @@ def all_stats(message):
     conn.close()
 
     if not users:
-        send_message_with_cleanup(message.chat.id, "Нет пользователей.")
+        bot.send_message(message.chat.id, "Нет пользователей.")
         return
 
     text = "👥 Статистика по всем пользователям:\n"
     for u in users:
         uname = f"@{u['username']}" if u['username'] else u['chat_id']
         text += f"- {uname}: день {u['day']}, серия {u['streak']} дней\n"
-    send_message_with_cleanup(message.chat.id, text)
+    bot.send_message(message.chat.id, text)
 
 # 🎛 Обработка кнопок
 @bot.callback_query_handler(func=lambda call: True)
@@ -280,19 +255,19 @@ def handle_inline_buttons(call):
         logging.warning(f"Callback error: {e}")
 
     if data == "today":
-        send_message_with_cleanup(chat_id, f"📌 Сегодня: {get_task(user)}", reply_markup=get_inline_keyboard(user))
+        bot.send_message(chat_id, f"📌 Сегодня: {get_task(user)}", reply_markup=get_inline_keyboard(user))
 
     elif data == "next":
         task, achievements, user = next_task(user)
         text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {user['streak']} дней\n📅 День {user['day']}/{len(TASKS)}"
-        send_message_with_cleanup(chat_id, text, reply_markup=get_inline_keyboard(user))
+        bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(user))
         for ach in achievements:
-            send_message_with_cleanup(chat_id, f"🎉 {ach}")
+            bot.send_message(chat_id, f"🎉 {ach}")
 
     elif data == "stats":
         ach_list = [ACHIEVEMENTS[int(x)].split(" ")[0] for x in (user['achievements'] or []) if int(x) in ACHIEVEMENTS]
         ach_text = "🎯 Достижения: " + (" ".join(ach_list) if ach_list else "пока нет")
-        send_message_with_cleanup(
+        bot.send_message(
             chat_id,
             f"📊 Статистика:\n📅 День: {user['day']}/{len(TASKS)}\n🔥 Серия: {user['streak']} дней подряд\n{ach_text}",
             reply_markup=get_inline_keyboard(user)
@@ -300,14 +275,14 @@ def handle_inline_buttons(call):
 
     elif data == "subscribe":
         update_user(chat_id, subscribed=True)
-        send_message_with_cleanup(chat_id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard(get_user(chat_id)))
+        bot.send_message(chat_id, "✅ Напоминания включены! Буду писать в 09:00 каждый день.", reply_markup=get_inline_keyboard(get_user(chat_id)))
 
     elif data == "unsubscribe":
         update_user(chat_id, subscribed=False)
-        send_message_with_cleanup(chat_id, "❌ Ты отписался от напоминаний.", reply_markup=get_inline_keyboard(get_user(chat_id)))
+        bot.send_message(chat_id, "❌ Ты отписался от напоминаний.", reply_markup=get_inline_keyboard(get_user(chat_id)))
 
     elif data == "help":
-        send_message_with_cleanup(
+        bot.send_message(
             chat_id,
             "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
             "📅 — показать задание на сегодня\n"
@@ -336,9 +311,9 @@ def send_scheduled_task():
         try:
             task, achievements, user = next_task(user)
             text = f"📌 Автоматическое напоминание:\n{task}\n\n🔥 Серия: {user['streak']} дней\n📅 День {user['day']}/{len(TASKS)}"
-            send_message_with_cleanup(user['chat_id'], text, reply_markup=get_inline_keyboard(user))
+            bot.send_message(user['chat_id'], text, reply_markup=get_inline_keyboard(user))
             for ach in achievements:
-                send_message_with_cleanup(user['chat_id'], f"🎉 {ach}")
+                bot.send_message(user['chat_id'], f"🎉 {ach}")
         except Exception as e:
             logging.error(f"Error in scheduled task for {user['chat_id']}: {e}")
 
@@ -391,7 +366,6 @@ def start_web_server():
 # ▶️ Запуск
 if __name__ == '__main__':
     bot.remove_webhook()
-    time.sleep(1)  # Задержка для стабильного удаления вебхука
     bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"🔗 Webhook установлен: {WEBHOOK_URL}")
 
