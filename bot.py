@@ -170,21 +170,17 @@ def next_task(user):
 
 # 🖲 Кнопки
 def get_inline_keyboard(user):
-    keyboard = types.InlineKeyboardMarkup(row_width=2)  # Устанавливаем ширину ряда (2 кнопки в ряд)
-    # Кнопки в парах для компактности
+    keyboard = types.InlineKeyboardMarkup(row_width=1)  # Одна кнопка на ряд
+    keyboard.add(types.InlineKeyboardButton("📅 Сегодня", callback_data="today"))
+    keyboard.add(types.InlineKeyboardButton("✅ Выполнено", callback_data="next"))
+    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
     keyboard.add(
-        types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-        types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
+        types.InlineKeyboardButton(
+            "❌ Отписаться" if user['subscribed'] else "🔔 Подписаться (09:00)",
+            callback_data="unsubscribe" if user['subscribed'] else "subscribe"
+        )
     )
-    keyboard.add(
-        types.InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-        types.InlineKeyboardButton("ℹ Помощь", callback_data="help")
-    )
-    # Кнопка подписки/отписки в отдельном ряду для акцента
-    if user['subscribed']:
-        keyboard.add(types.InlineKeyboardButton("❌ Отписаться", callback_data="unsubscribe"))
-    else:
-        keyboard.add(types.InlineKeyboardButton("🔔 Подписаться (09:00)", callback_data="subscribe"))
+    keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
     return keyboard
 
 # 🚀 /start
