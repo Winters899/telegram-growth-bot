@@ -1,3 +1,4 @@
+# Полный файл bot.py с добавленной безопасной миграцией столбца last_menu_message_id
 import os
 import telebot
 import schedule
@@ -81,23 +82,31 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
+    """
+    Создаём таблицу users, если её нет, и добавляем колонку last_menu_message_id, если её нет.
+    Это позволяет безопасно обновлять схему при деплое.
+    """
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        chat_id BIGINT PRIMARY KEY,
-        day INTEGER DEFAULT 1,
-        streak INTEGER DEFAULT 0,
-        last_done DATE,
-        achievements TEXT[] DEFAULT '{}',
-        subscribed BOOLEAN DEFAULT FALSE,
-        username TEXT,
-        last_menu_message_id INTEGER
-    );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        # создаём таблицу если её нет
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id BIGINT PRIMARY KEY,
+            day INTEGER DEFAULT 1,
+            streak INTEGER DEFAULT 0,
+            last_done DATE,
+            achievements TEXT[] DEFAULT '{}',
+            subscribed BOOLEAN DEFAULT FALSE,
+            username TEXT
+        );
+        """)
+        # гарантия, что колонка last_menu_message_id существует (Postgres поддерживает IF NOT EXISTS)
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_menu_message_id INTEGER;")
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 
 init_db()
 
@@ -148,6 +157,8 @@ def update_user(chat_id, **kwargs):
         values.append(chat_id)
         cur.execute(f"UPDATE users SET {fields} WHERE chat_id = %s", tuple(values))
         conn.commit()
+    except Exception as e:
+        logging.warning(f"update_user error for {chat_id}: {e}")
     finally:
         cur.close()
         conn.close()
@@ -221,14 +232,6 @@ def get_inline_keyboard(user):
 
 # === send_menu (устраняет "липкие" клавиши)
 def send_menu(chat_id, user, text):
-    """
-    Отправляет меню пользователю:
-    - получает свежие данные пользователя,
-    - пытается убрать reply_markup у предыдущего меню (если prev_id валидный),
-    - если edit_message_reply_markup не удался — пробует удалить сообщение,
-      и очищает last_menu_message_id в БД, чтобы не пытаться снова,
-    - отправляет новое сообщение с клавиатурой и сохраняет его message_id в БД.
-    """
     try:
         # Берём актуальную версию пользователя
         fresh_user = get_user(chat_id) or user or {'subscribed': False}
@@ -246,13 +249,11 @@ def send_menu(chat_id, user, text):
                     logging.debug(f"Cleared reply_markup for message {prev_int} in chat {chat_id}")
                 except Exception as e_edit:
                     logging.debug(f"edit_message_reply_markup failed for {prev_int} in {chat_id}: {e_edit}")
-                    # Попытаться удалить предыдущее сообщение — иногда это помогает очистить "липкие" клавиши
                     try:
                         bot.delete_message(chat_id, prev_int)
                         logging.debug(f"Deleted previous menu {prev_int} for {chat_id}")
                     except Exception as e_del:
                         logging.debug(f"delete_message also failed for {prev_int} in {chat_id}: {e_del}")
-                    # Очистить сохранённый id, чтобы не пытаться снова
                     try:
                         update_user(chat_id, last_menu_message_id=None)
                     except Exception as e_upd:
@@ -260,7 +261,6 @@ def send_menu(chat_id, user, text):
             else:
                 logging.debug(f"send_menu: prev_id invalid for {chat_id}: {prev_id}")
 
-        # Отправляем новое меню (reply_markup только здесь)
         msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(fresh_user))
         try:
             update_user(chat_id, last_menu_message_id=int(msg.message_id))
@@ -393,10 +393,6 @@ def schedule_checker():
         time.sleep(30)
 
 def send_scheduled_task():
-    """
-    Отправляет напоминание о текущем задании подписчикам, но НЕ помечает задание как выполненное.
-    И НЕ прикрепляет клавиатуру (чтобы не создавать лишних меню).
-    """
     conn = get_db()
     cur = conn.cursor()
     try:
