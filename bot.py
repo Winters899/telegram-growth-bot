@@ -207,27 +207,23 @@ def next_task(user):
 
 # 🖲 Кнопки
 def get_inline_keyboard(user):
+    """
+    Каждая кнопка в своей строке — в клиентах Telegram это отображается по центру.
+    """
     if not user:
         user = {'subscribed': False}
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        ("📅 Сегодня", "today"),
-        ("✅ Выполнено", "next"),
-        ("📊 Статистика", "stats"),
-        ("ℹ Помощь", "help"),
-        ("❌ Отписаться" if user.get('subscribed') else "🔔 Подписаться", "unsubscribe" if user.get('subscribed') else "subscribe")
-    ]
-    keyboard.add(
-        types.InlineKeyboardButton(buttons[0][0].ljust(12, '\u00A0'), callback_data=buttons[0][1]),
-        types.InlineKeyboardButton(buttons[1][0].ljust(12, '\u00A0'), callback_data=buttons[1][1])
-    )
-    keyboard.add(
-        types.InlineKeyboardButton(buttons[2][0].ljust(12, '\u00A0'), callback_data=buttons[2][1]),
-        types.InlineKeyboardButton(buttons[3][0].ljust(12, '\u00A0'), callback_data=buttons[3][1])
-    )
-    keyboard.add(
-        types.InlineKeyboardButton(buttons[4][0].ljust(12, '\u00A0'), callback_data=buttons[4][1])
-    )
+
+    keyboard = types.InlineKeyboardMarkup()
+keyboard.row(
+    types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
+    types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
+)
+keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
+keyboard.add(types.InlineKeyboardButton("🔔 Подписаться", callback_data="subscribe"))
+    for label, callback in buttons:
+        keyboard.add(types.InlineKeyboardButton(label, callback_data=callback))
+
     return keyboard
 
 # === send_menu (устраняет "липкие" клавиши)
