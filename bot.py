@@ -1,4 +1,3 @@
-# Полный файл bot.py с добавленной безопасной миграцией столбца last_menu_message_id
 import os
 import telebot
 import schedule
@@ -84,12 +83,12 @@ def get_db():
 def init_db():
     """
     Создаём таблицу users, если её нет, и добавляем колонку last_menu_message_id, если её нет.
-    Это позволяет безопасно обновлять схему при деплое.
+    Безопасная миграция с проверкой существования схемы.
     """
     conn = get_db()
     cur = conn.cursor()
     try:
-        # создаём таблицу если её нет
+        # Проверяем существование таблицы
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id BIGINT PRIMARY KEY,
@@ -101,9 +100,13 @@ def init_db():
             username TEXT
         );
         """)
-        # гарантия, что колонка last_menu_message_id существует (Postgres поддерживает IF NOT EXISTS)
-        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_menu_message_id INTEGER;")
+        # Проверяем и добавляем колонку last_menu_message_id, если её нет
+        cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_menu_message_id') THEN ALTER TABLE users ADD COLUMN last_menu_message_id INTEGER; END IF; END $$;")
         conn.commit()
+        logging.info("Database schema initialized or verified.")
+    except psycopg2.Error as e:
+        logging.error(f"Database initialization failed: {e}")
+        raise
     finally:
         cur.close()
         conn.close()
@@ -206,14 +209,21 @@ def next_task(user):
     return get_task(user), check_achievements(user), user
 
 # 🖲 Кнопки
-keyboard = types.InlineKeyboardMarkup()
-keyboard.row(
-    types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-    types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
-)
-keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
-keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
-keyboard.add(types.InlineKeyboardButton("🔔 Подписаться", callback_data="subscribe"))
+def get_inline_keyboard(user):
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.row(
+        types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
+        types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
+    )
+    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+    keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "🔔 Подписаться" if not user.get('subscribed', False) else "❌ Отписаться",
+            callback_data="subscribe" if not user.get('subscribed', False) else "unsubscribe"
+        )
+    )
+    return keyboard
 
 # === send_menu (устраняет "липкие" клавиши)
 def send_menu(chat_id, user, text):
@@ -248,9 +258,9 @@ def send_menu(chat_id, user, text):
 
         msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(fresh_user))
         try:
-            update_user(chat_id, last_menu_message_id=int(msg.message_id))
+            update_user(chat_id, last_menu_message_id=msg.message_id)
         except Exception as e:
-            logging.warning(f"Can't save last_menu_message_id for {chat_id}: {getattr(msg, 'message_id', None)} ({e})")
+            logging.warning(f"Can't save last_menu_message_id for {chat_id}: {msg.message_id} ({e})")
     except Exception as e:
         logging.error(f"send_menu error for {chat_id}: {e}")
 
