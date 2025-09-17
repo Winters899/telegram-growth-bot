@@ -80,8 +80,7 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    # Важно: если у вас уже есть users таблица с day, то это не изменит существующие строки.
-    # Я рекомендую выполнить миграцию для перевода значений day (если нужно) на новую семантику (1..30).
+    # Если таблицы ещё нет, создадим с колонкой last_menu_message_id
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -92,7 +91,8 @@ def init_db():
         last_done DATE,
         achievements TEXT[] DEFAULT '{}',
         subscribed BOOLEAN DEFAULT FALSE,
-        username TEXT
+        username TEXT,
+        last_menu_message_id INTEGER
     );
     """)
     conn.commit()
@@ -109,7 +109,6 @@ def init_user(chat_id, username=None):
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         user = cur.fetchone()
         if not user:
-            # day = 1 по умолчанию — первый день программы
             cur.execute("INSERT INTO users (chat_id, username, day) VALUES (%s, %s, %s)", (chat_id, username, 1))
             conn.commit()
     finally:
@@ -144,7 +143,6 @@ def update_user(chat_id, **kwargs):
 
 # 🔄 Получить задание
 def get_task(user):
-    # user['day'] рассматриваем как номер дня (1..30)
     day = user.get('day') or 1
     idx = max(0, min(len(TASKS)-1, day-1))
     return TASKS[idx]
@@ -160,13 +158,12 @@ def check_achievements(user):
             new_achievements = existing + [str_threshold]
             update_user(user['chat_id'], achievements=new_achievements)
             unlocked.append(text)
-            existing = new_achievements  # обновляем локально, чтобы не дублировать
+            existing = new_achievements
     return unlocked
 
 # ⏩ Следующее задание (пользователь нажал "Выполнено")
 def next_task(user):
     today = datetime.utcnow().date()
-    # можно считать last_done в UTC или по вашей логике; тут используем UTC для единообразия
     last_done = user.get('last_done')
     streak = user.get('streak') or 0
 
@@ -174,7 +171,6 @@ def next_task(user):
         if today == last_done + timedelta(days=1):
             streak += 1
         elif today == last_done:
-            # повторно нажали в тот же день — не меняем серию
             pass
         else:
             streak = 1
@@ -190,9 +186,8 @@ def next_task(user):
 # 🖲 Кнопки
 def get_inline_keyboard(user):
     if not user:
-        # защищаемся на случай, если user отсутствует
         user = {'subscribed': False}
-    keyboard = types.InlineKeyboardMarkup(row_width=2)  # Две кнопки в строке
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
     buttons = [
         ("📅 Сегодня", "today"),
         ("✅ Выполнено", "next"),
@@ -200,7 +195,6 @@ def get_inline_keyboard(user):
         ("ℹ Помощь", "help"),
         ("❌ Отписаться" if user.get('subscribed') else "🔔 Подписаться", "unsubscribe" if user.get('subscribed') else "subscribe")
     ]
-    # Первые четыре кнопки по парам
     keyboard.add(
         types.InlineKeyboardButton(buttons[0][0].ljust(12, '\u00A0'), callback_data=buttons[0][1]),
         types.InlineKeyboardButton(buttons[1][0].ljust(12, '\u00A0'), callback_data=buttons[1][1])
@@ -209,22 +203,43 @@ def get_inline_keyboard(user):
         types.InlineKeyboardButton(buttons[2][0].ljust(12, '\u00A0'), callback_data=buttons[2][1]),
         types.InlineKeyboardButton(buttons[3][0].ljust(12, '\u00A0'), callback_data=buttons[3][1])
     )
-    # Кнопка подписки/отписки отдельно
     keyboard.add(
         types.InlineKeyboardButton(buttons[4][0].ljust(12, '\u00A0'), callback_data=buttons[4][1])
     )
     return keyboard
+
+# === Новая функция: send_menu ===
+def send_menu(chat_id, user, text):
+    """
+    Отправляет меню пользователю:
+    - очищает клавиатуру у предыдущего меню (если есть),
+    - отправляет новое сообщение с клавиатурой,
+    - сохраняет message_id нового меню в users.last_menu_message_id.
+    """
+    try:
+        prev_id = user.get('last_menu_message_id')
+        if prev_id:
+            try:
+                bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_id, reply_markup=None)
+            except Exception as e:
+                # часто сообщение могло быть удалено пользователем -> игнорируем
+                logging.debug(f"Can't clear previous menu {prev_id} for {chat_id}: {e}")
+
+        msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(user))
+        update_user(chat_id, last_menu_message_id=msg.message_id)
+    except Exception as e:
+        logging.error(f"send_menu error for {chat_id}: {e}")
 
 # ▶️ /start
 @bot.message_handler(commands=['start'])
 def start(message):
     init_user(message.chat.id, message.from_user.username)
     user = get_user(message.chat.id)
-    bot.send_message(
+    send_menu(
         message.chat.id,
+        user,
         "Привет 👋 Я твой наставник на 30-дневном пути развития!\n\n"
-        "Нажимай кнопки ниже, чтобы получать задания и отмечать выполнение.",
-        reply_markup=get_inline_keyboard(user)
+        "Нажимай кнопки ниже, чтобы получать задания и отмечать выполнение."
     )
 
 # 📊 /stats
@@ -238,10 +253,10 @@ def stats(message):
         except Exception:
             pass
     ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
-    bot.send_message(
+    send_menu(
         message.chat.id,
-        f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}",
-        reply_markup=get_inline_keyboard(user)
+        user,
+        f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}"
     )
 
 # 👑 /all_stats (только админ)
@@ -284,12 +299,12 @@ def handle_inline_buttons(call):
         logging.warning(f"Callback error: {e}")
 
     if data == "today":
-        bot.send_message(chat_id, f"📌 Сегодня: {get_task(user)}", reply_markup=get_inline_keyboard(user))
+        send_menu(chat_id, user, f"📌 Сегодня: {get_task(user)}")
 
     elif data == "next":
         task, achievements, user = next_task(user)
         text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {user.get('streak')} дней\n📅 День {user.get('day')}/{len(TASKS)}"
-        bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(user))
+        send_menu(chat_id, user, text)
         for ach in achievements:
             bot.send_message(chat_id, f"🎉 {ach}")
 
@@ -301,30 +316,32 @@ def handle_inline_buttons(call):
             except Exception:
                 pass
         ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
-        bot.send_message(
+        send_menu(
             chat_id,
-            f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}",
-            reply_markup=get_inline_keyboard(user)
+            user,
+            f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}"
         )
 
     elif data == "subscribe":
         update_user(chat_id, subscribed=True)
-        bot.send_message(chat_id, "✅ Напоминания включены! Буду писать в установленное время.", reply_markup=get_inline_keyboard(get_user(chat_id)))
+        user = get_user(chat_id)
+        send_menu(chat_id, user, "✅ Напоминания включены! Буду писать в установленное время.")
 
     elif data == "unsubscribe":
         update_user(chat_id, subscribed=False)
-        bot.send_message(chat_id, "❌ Ты отписался от напоминаний.", reply_markup=get_inline_keyboard(get_user(chat_id)))
+        user = get_user(chat_id)
+        send_menu(chat_id, user, "❌ Ты отписался от напоминаний.")
 
     elif data == "help":
-        bot.send_message(
+        send_menu(
             chat_id,
+            user,
             "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
             "📅 — показать задание на сегодня\n"
             "✅ — отметить выполнение\n"
             "📊 — статистика\n"
             "🔔 — подписка на напоминания\n\n"
-            "🎯 Выполняя задания подряд, ты будешь получать достижения!",
-            reply_markup=get_inline_keyboard(user)
+            "🎯 Выполняя задания подряд, ты будешь получать достижения!"
         )
 
 # ⏰ Планировщик (только подписчикам)
@@ -336,7 +353,7 @@ def schedule_checker():
 def send_scheduled_task():
     """
     Отправляет напоминание о текущем задании подписчикам, но НЕ помечает задание как выполненное.
-    Это критично: автоматические напоминания не должны менять состояние пользователя.
+    И НЕ прикрепляет клавиатуру (чтобы не создавать лишних меню).
     """
     conn = get_db()
     cur = conn.cursor()
@@ -349,11 +366,9 @@ def send_scheduled_task():
 
     for user in subs:
         try:
-            # НЕ вызываем next_task здесь! Только показываем текущее задание
             task = get_task(user)
-            text = f"📌 Автоматическое напоминание:\n{task}\n\n"
-            text += "Если выполнил(а) — нажми ✅ в боте, чтобы отметить."
-            bot.send_message(user['chat_id'], text, reply_markup=get_inline_keyboard(user))
+            text = f"📌 Автоматическое напоминание:\n{task}\n\nЕсли выполнил(а) — открой бот и нажми ✅."
+            bot.send_message(user['chat_id'], text)
         except Exception as e:
             logging.error(f"Error in scheduled task for {user['chat_id']}: {e}")
 
@@ -381,7 +396,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # 📝 Логируем апдейты
             if update.message:
                 user = update.message.from_user
                 logging.info(f"📩 Сообщение от @{user.username or user.id}: {update.message.text}")
@@ -415,7 +429,7 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"🔗 Webhook установлен: {WEBHOOK_URL}")
 
-    REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")  # формат HH:MM, по умолчанию 09:00
+    REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
     schedule.every().day.at(REMINDER_HOUR).do(send_scheduled_task)
     threading.Thread(target=schedule_checker, daemon=True).start()
 
