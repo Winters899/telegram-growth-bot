@@ -262,7 +262,7 @@ def check_achievements(user):
 
 # Переход к следующему заданию
 def next_task(user):
-    today = datetime.now(timezone.UTC).date()
+    today = datetime.now(timezone.utc).date()
     last_done = user.get('last_done')
     streak = user.get('streak') or 0
 
@@ -293,7 +293,7 @@ def cleanup_inactive_users():
     with DB_LOCK:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                threshold = datetime.now(timezone.UTC).date() - timedelta(days=90)
+                threshold = datetime.now(timezone.utc).date() - timedelta(days=90)
                 cur.execute("DELETE FROM users WHERE last_done < %s", (threshold,))
                 conn.commit()
                 logging.info(f"Удалено {cur.rowcount} неактивных пользователей")
@@ -304,7 +304,7 @@ def get_inline_keyboard(user):
     keyboard = types.InlineKeyboardMarkup()
     current_day = user.get('day') or 1
     last_done = user.get('last_done')
-    today = datetime.now(timezone.UTC).date()
+    today = datetime.now(timezone.utc).date()
     total_days = 30  # Можно динамически брать из таблицы tasks
 
     # Прогресс-бар
