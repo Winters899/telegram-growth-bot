@@ -206,14 +206,7 @@ def next_task(user):
     return get_task(user), check_achievements(user), user
 
 # 🖲 Кнопки
-def get_inline_keyboard(user):
-    """
-    Каждая кнопка в своей строке — в клиентах Telegram это отображается по центру.
-    """
-    if not user:
-        user = {'subscribed': False}
-
-    keyboard = types.InlineKeyboardMarkup()
+keyboard = types.InlineKeyboardMarkup()
 keyboard.row(
     types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
     types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
@@ -221,10 +214,6 @@ keyboard.row(
 keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
 keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
 keyboard.add(types.InlineKeyboardButton("🔔 Подписаться", callback_data="subscribe"))
-    for label, callback in buttons:
-        keyboard.add(types.InlineKeyboardButton(label, callback_data=callback))
-
-    return keyboard
 
 # === send_menu (устраняет "липкие" клавиши)
 def send_menu(chat_id, user, text):
