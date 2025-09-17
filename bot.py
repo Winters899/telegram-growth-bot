@@ -181,7 +181,7 @@ def init_db():
                 for i, task in enumerate(TASKS, 1):
                     cur.execute("INSERT INTO tasks (day, description) VALUES (%s, %s)", (i, task))
             # Миграция: добавление колонки timezone, если её нет
-            cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END $$;", (DEFAULT_TIMEZONE,))
+            cur.execute("DO $$   BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END   $$;", (DEFAULT_TIMEZONE,))
             conn.commit()
         release_db(conn)
     logging.info("Схема базы данных инициализирована.")
