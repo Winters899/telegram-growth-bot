@@ -479,6 +479,7 @@ def handle_inline_buttons(call):
     # Проверка на спам кнопками
     if user_key in last_callback_time and current_time - last_callback_time[user_key] < 2:
         send_message_with_rate_limit(chat_id, "⏳ Пожалуйста, подожди немного перед повторным нажатием.")
+        bot.answer_callback_query(call.id, text="Слишком быстро! Подожди немного.")
         return
     last_callback_time[user_key] = current_time
 
@@ -490,10 +491,16 @@ def handle_inline_buttons(call):
     # Проверка возраста callback-запроса
     try:
         callback_time = pendulum.from_timestamp(call.message.date, tz=user.get('timezone', DEFAULT_TIMEZONE))
-        if (pendulum.now(user.get('timezone', DEFAULT_TIMEZONE)) - callback_time).total_seconds() < 10:
-            bot.answer_callback_query(call.id)
+        time_diff = (pendulum.now(user.get('timezone', DEFAULT_TIMEZONE)) - callback_time).total_seconds()
+        if time_diff >= 10:
+            logging.info(f"Пропущен устаревший callback от {chat_id}: {data}, возраст {time_diff} секунд")
+            bot.answer_callback_query(call.id, text="Запрос устарел, попробуй снова.")
+            return
+        bot.answer_callback_query(call.id)
     except Exception as e:
-        logging.warning(f"Ошибка callback для {chat_id}: {e}")
+        logging.warning(f"Ошибка проверки callback для {chat_id}: {e}")
+        bot.answer_callback_query(call.id, text="Произошла ошибка, попробуй снова.")
+        return
 
     if data == "today":
         send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
