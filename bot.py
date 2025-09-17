@@ -77,10 +77,10 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set.")
 
 def get_db():
+    # Простейшее подключение; при повышенной нагрузке лучше заменить на пул
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    # Если таблицы ещё нет, создадим с колонкой last_menu_message_id
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -129,11 +129,22 @@ def get_user(chat_id):
 def update_user(chat_id, **kwargs):
     if not kwargs:
         return
+    # Белый список полей, которые можно обновлять
+    allowed_fields = {
+        "day", "streak", "last_done", "achievements",
+        "subscribed", "username", "last_menu_message_id"
+    }
+    # Фильтруем недопустимые ключи
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}
+    if not safe_kwargs:
+        logging.warning(f"update_user: no allowed fields to update for {chat_id}: {list(kwargs.keys())}")
+        return
+
     conn = get_db()
     cur = conn.cursor()
     try:
-        fields = ", ".join([f"{k} = %s" for k in kwargs.keys()])
-        values = list(kwargs.values())
+        fields = ", ".join([f"{k} = %s" for k in safe_kwargs.keys()])
+        values = list(safe_kwargs.values())
         values.append(chat_id)
         cur.execute(f"UPDATE users SET {fields} WHERE chat_id = %s", tuple(values))
         conn.commit()
@@ -208,25 +219,53 @@ def get_inline_keyboard(user):
     )
     return keyboard
 
-# === Новая функция: send_menu ===
+# === send_menu (устраняет "липкие" клавиши)
 def send_menu(chat_id, user, text):
     """
     Отправляет меню пользователю:
-    - очищает клавиатуру у предыдущего меню (если есть),
-    - отправляет новое сообщение с клавиатурой,
-    - сохраняет message_id нового меню в users.last_menu_message_id.
+    - получает свежие данные пользователя,
+    - пытается убрать reply_markup у предыдущего меню (если prev_id валидный),
+    - если edit_message_reply_markup не удался — пробует удалить сообщение,
+      и очищает last_menu_message_id в БД, чтобы не пытаться снова,
+    - отправляет новое сообщение с клавиатурой и сохраняет его message_id в БД.
     """
     try:
-        prev_id = user.get('last_menu_message_id')
-        if prev_id:
-            try:
-                bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_id, reply_markup=None)
-            except Exception as e:
-                # часто сообщение могло быть удалено пользователем -> игнорируем
-                logging.debug(f"Can't clear previous menu {prev_id} for {chat_id}: {e}")
+        # Берём актуальную версию пользователя
+        fresh_user = get_user(chat_id) or user or {'subscribed': False}
+        prev_id = fresh_user.get('last_menu_message_id')
 
-        msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(user))
-        update_user(chat_id, last_menu_message_id=msg.message_id)
+        if prev_id is not None:
+            try:
+                prev_int = int(prev_id)
+            except (ValueError, TypeError):
+                prev_int = None
+
+            if prev_int and prev_int > 0:
+                try:
+                    bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_int, reply_markup=None)
+                    logging.debug(f"Cleared reply_markup for message {prev_int} in chat {chat_id}")
+                except Exception as e_edit:
+                    logging.debug(f"edit_message_reply_markup failed for {prev_int} in {chat_id}: {e_edit}")
+                    # Попытаться удалить предыдущее сообщение — иногда это помогает очистить "липкие" клавиши
+                    try:
+                        bot.delete_message(chat_id, prev_int)
+                        logging.debug(f"Deleted previous menu {prev_int} for {chat_id}")
+                    except Exception as e_del:
+                        logging.debug(f"delete_message also failed for {prev_int} in {chat_id}: {e_del}")
+                    # Очистить сохранённый id, чтобы не пытаться снова
+                    try:
+                        update_user(chat_id, last_menu_message_id=None)
+                    except Exception as e_upd:
+                        logging.warning(f"Failed to clear last_menu_message_id for {chat_id}: {e_upd}")
+            else:
+                logging.debug(f"send_menu: prev_id invalid for {chat_id}: {prev_id}")
+
+        # Отправляем новое меню (reply_markup только здесь)
+        msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(fresh_user))
+        try:
+            update_user(chat_id, last_menu_message_id=int(msg.message_id))
+        except Exception as e:
+            logging.warning(f"Can't save last_menu_message_id for {chat_id}: {getattr(msg, 'message_id', None)} ({e})")
     except Exception as e:
         logging.error(f"send_menu error for {chat_id}: {e}")
 
@@ -269,7 +308,7 @@ def all_stats(message):
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM users ORDER BY day DESC;")
+        cur.execute("SELECT chat_id, username, day, streak FROM users ORDER BY day DESC LIMIT 500;")
         users = cur.fetchall()
     finally:
         cur.close()
@@ -279,7 +318,7 @@ def all_stats(message):
         bot.send_message(message.chat.id, "Нет пользователей.")
         return
 
-    text = "👥 Статистика по всем пользователям:\n"
+    text = "👥 Статистика по пользователям (макс 500):\n"
     for u in users:
         uname = f"@{u['username']}" if u.get('username') else u['chat_id']
         text += f"- {uname}: день {u.get('day')}, серия {u.get('streak')} дней\n"
@@ -306,7 +345,10 @@ def handle_inline_buttons(call):
         text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {user.get('streak')} дней\n📅 День {user.get('day')}/{len(TASKS)}"
         send_menu(chat_id, user, text)
         for ach in achievements:
-            bot.send_message(chat_id, f"🎉 {ach}")
+            try:
+                bot.send_message(chat_id, f"🎉 {ach}")
+            except Exception as e:
+                logging.error(f"Failed to send achievement to {chat_id}: {e}")
 
     elif data == "stats":
         ach_list = []
@@ -398,7 +440,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             if update.message:
                 user = update.message.from_user
-                logging.info(f"📩 Сообщение от @{user.username or user.id}: {update.message.text}")
+                logging.info(f"📩 Сообщение от @{user.username or user.id}: {getattr(update.message, 'text', '')}")
             elif update.callback_query:
                 user = update.callback_query.from_user
                 logging.info(f"🔘 Callback от @{user.username or user.id}: {update.callback_query.data}")
