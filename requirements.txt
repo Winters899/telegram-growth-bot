@@ -1,7 +1,5 @@
-pyTelegramBotAPI
-python-telegram-bot 
-schedule 
-psycopg2-binary
-flask
-ratelimiter 
-pendulum
+python-telegram-bot==13.7
+schedule==1.2.0
+psycopg2-binary==2.9.9
+flask==3.0.3
+pendulum==3.0.0
