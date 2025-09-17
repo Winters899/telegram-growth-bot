@@ -1,6 +1,7 @@
 pyTelegramBotAPI
-schedule
+python-telegram-bot 
+schedule 
 psycopg2-binary
-
-
-pip install python-telegram-bot schedule psycopg2-binary flask ratelimiter pendulum
+flask
+ratelimiter 
+pendulum
