@@ -9,10 +9,11 @@ from flask import Flask, request
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from telebot import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 from ratelimiter import RateLimiter
 import pendulum
+import random
 
 # Настройка логирования с ротацией
 log_handler = logging.handlers.RotatingFileHandler('bot.log', maxBytes=10*1024*1024, backupCount=5)
@@ -54,9 +55,31 @@ rate_limiter = RateLimiter(max_calls=30, period=1)
 # Блокировка для потокобезопасного доступа к базе данных
 DB_LOCK = threading.Lock()
 
-# Настройка часового пояса
-TIMEZONE = os.getenv("BOT_TIMEZONE", "UTC")
+# Настройка времени по умолчанию
+DEFAULT_TIMEZONE = os.getenv("BOT_TIMEZONE", "UTC")
 REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
+
+# Кэш для предотвращения спама кнопками
+last_callback_time = {}
+
+# Мотивационные цитаты
+MOTIVATIONAL_QUOTES = [
+    "Каждый шаг приближает тебя к цели! 🚀",
+    "Ты делаешь это! Продолжай сиять! 🌟",
+    "Маленькие действия приводят к большим результатам! 💪",
+    "Твоя дисциплина — твоя суперсила! 🦸"
+]
+
+# Список популярных часовых поясов для выбора
+TIMEZONES = [
+    "Europe/Moscow",
+    "Europe/London",
+    "America/New_York",
+    "America/Los_Angeles",
+    "Asia/Tokyo",
+    "Australia/Sydney",
+    "UTC"
+]
 
 # Список заданий (для начальной загрузки в БД)
 TASKS = [
@@ -121,9 +144,10 @@ def init_db():
                 achievements TEXT[] DEFAULT '{}',
                 subscribed BOOLEAN DEFAULT FALSE,
                 username TEXT,
-                last_menu_message_id INTEGER
+                last_menu_message_id INTEGER,
+                timezone TEXT DEFAULT %s
             );
-            """)
+            """, (DEFAULT_TIMEZONE,))
             # Создание таблицы tasks
             cur.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
@@ -136,6 +160,8 @@ def init_db():
             if cur.fetchone()['count'] == 0:
                 for i, task in enumerate(TASKS, 1):
                     cur.execute("INSERT INTO tasks (day, description) VALUES (%s, %s)", (i, task))
+            # Миграция: добавление колонки timezone, если её нет
+            cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END $$;", (DEFAULT_TIMEZONE,))
             conn.commit()
         release_db(conn)
     logging.info("Схема базы данных инициализирована.")
@@ -151,7 +177,7 @@ def init_user(chat_id, username=None):
                 cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
                 user = cur.fetchone()
                 if not user:
-                    cur.execute("INSERT INTO users (chat_id, username, day) VALUES (%s, %s, %s)", (chat_id, safe_username, 1))
+                    cur.execute("INSERT INTO users (chat_id, username, day, timezone) VALUES (%s, %s, %s, %s)", (chat_id, safe_username, 1, DEFAULT_TIMEZONE))
                     conn.commit()
             release_db(conn)
 
@@ -169,7 +195,7 @@ def update_user(chat_id, **kwargs):
         return
     allowed_fields = {
         "day", "streak", "last_done", "achievements",
-        "subscribed", "username", "last_menu_message_id"
+        "subscribed", "username", "last_menu_message_id", "timezone"
     }
     safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}
     if not safe_kwargs:
@@ -216,7 +242,7 @@ def check_achievements(user):
 
 # Переход к следующему заданию
 def next_task(user):
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.UTC).date()
     last_done = user.get('last_done')
     streak = user.get('streak') or 0
 
@@ -247,7 +273,7 @@ def cleanup_inactive_users():
     with DB_LOCK:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                threshold = datetime.utcnow().date() - timedelta(days=90)
+                threshold = datetime.now(timezone.UTC).date() - timedelta(days=90)
                 cur.execute("DELETE FROM users WHERE last_done < %s", (threshold,))
                 conn.commit()
                 logging.info(f"Удалено {cur.rowcount} неактивных пользователей")
@@ -256,11 +282,27 @@ def cleanup_inactive_users():
 # Инлайн-клавиатура
 def get_inline_keyboard(user):
     keyboard = types.InlineKeyboardMarkup()
-    keyboard.row(
-        types.InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-        types.InlineKeyboardButton("✅ Выполнено", callback_data="next")
-    )
-    keyboard.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+    current_day = user.get('day') or 1
+    last_done = user.get('last_done')
+    today = datetime.now(timezone.UTC).date()
+    total_days = 30  # Можно динамически брать из таблицы tasks
+
+    # Прогресс-бар
+    progress = int((current_day / total_days) * 10)
+    progress_bar = "[" + "█" * progress + " " * (10 - progress) + f"] {current_day}/{total_days}"
+
+    # Проверяем, выполнено ли задание сегодня
+    can_mark_done = not last_done or last_done != today
+
+    # Основные кнопки
+    buttons = [
+        types.InlineKeyboardButton("📅 Сегодня", callback_data="today")
+    ]
+    if can_mark_done:
+        buttons.append(types.InlineKeyboardButton("✅ Выполнено", callback_data="next"))
+    keyboard.row(*buttons)
+
+    keyboard.add(types.InlineKeyboardButton(f"📊 Статистика {progress_bar}", callback_data="stats"))
     keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
     keyboard.add(
         types.InlineKeyboardButton(
@@ -268,6 +310,15 @@ def get_inline_keyboard(user):
             callback_data="subscribe" if not user.get('subscribed', False) else "unsubscribe"
         )
     )
+    keyboard.add(types.InlineKeyboardButton("🌐 Часовой пояс", callback_data="set_timezone"))
+    return keyboard
+
+# Клавиатура для выбора часового пояса
+def get_timezone_keyboard():
+    keyboard = types.InlineKeyboardMarkup()
+    for tz in TIMEZONES:
+        keyboard.add(types.InlineKeyboardButton(tz, callback_data=f"tz_{tz}"))
+    keyboard.add(types.InlineKeyboardButton("⬅ Назад", callback_data="back_to_menu"))
     return keyboard
 
 # Отправка сообщений с ограничением скорости и повторными попытками
@@ -280,12 +331,13 @@ def send_message_with_rate_limit(chat_id, text, **kwargs):
                 logging.warning(f"Повтор {attempt+1}/3: Ошибка отправки сообщения {chat_id}: {e}")
                 time.sleep(2 ** attempt)
         logging.error(f"Не удалось отправить сообщение {chat_id} после попыток")
+        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка отправки сообщения для {chat_id}: {e}")
         return None
 
 # Отправка меню
 def send_menu(chat_id, user, text):
     try:
-        fresh_user = get_user(chat_id) or user or {'subscribed': False}
+        fresh_user = get_user(chat_id) or user or {'subscribed': False, 'timezone': DEFAULT_TIMEZONE}
         prev_id = fresh_user.get('last_menu_message_id')
         if prev_id:
             try:
@@ -295,7 +347,17 @@ def send_menu(chat_id, user, text):
                 logging.debug(f"Нет предыдущего меню для удаления в {chat_id}")
             update_user(chat_id, last_menu_message_id=None)
 
-        msg = send_message_with_rate_limit(chat_id, text, reply_markup=get_inline_keyboard(fresh_user))
+        # Добавляем персонализированное приветствие и мотивацию
+        username = f"@{fresh_user.get('username')}" if fresh_user.get('username') else "друг"
+        motivation = random.choice(MOTIVATIONAL_QUOTES)
+        formatted_text = f"**{text}**\n\n_{motivation}_"
+
+        msg = send_message_with_rate_limit(
+            chat_id,
+            formatted_text,
+            parse_mode="Markdown",
+            reply_markup=get_inline_keyboard(fresh_user)
+        )
         if msg:
             update_user(chat_id, last_menu_message_id=msg.message_id)
         else:
@@ -309,12 +371,34 @@ def send_menu(chat_id, user, text):
 def start(message):
     init_user(message.chat.id, message.from_user.username)
     user = get_user(message.chat.id)
+    username = f"@{user.get('username')}" if user.get('username') else "друг"
     send_menu(
         message.chat.id,
         user,
-        "Привет 👋 Я твой наставник на 30-дневном пути развития!\n\n"
-        "Нажимай кнопки ниже, чтобы получать задания и отмечать выполнение."
+        f"Привет, {username}! 👋 Я твой наставник на 30-дневном пути развития!\n\nНажимай кнопки ниже, чтобы начать челлендж."
     )
+
+# Команда /reset
+@bot.message_handler(commands=['reset'])
+def reset(message):
+    chat_id = message.chat.id
+    init_user(chat_id, message.from_user.username)
+    update_user(chat_id, day=1, streak=0, last_done=None, achievements=[])
+    user = get_user(chat_id)
+    username = f"@{user.get('username')}" if user.get('username') else "друг"
+    send_menu(
+        chat_id,
+        user,
+        f"🔄 Челлендж сброшен, {username}! Начинаем с первого дня.\n\n📌 Сегодня: {get_task(user)}"
+    )
+
+# Команда /settimezone
+@bot.message_handler(commands=['settimezone'])
+def set_timezone(message):
+    user = get_user(message.chat.id)
+    username = f"@{user.get('username')}" if user.get('username') else "друг"
+    text = f"🌐 Выбери часовой пояс для напоминаний, {username} (текущий: {user.get('timezone', DEFAULT_TIMEZONE)}):"
+    send_message_with_rate_limit(message.chat.id, text, reply_markup=get_timezone_keyboard())
 
 # Команда /stats
 @bot.message_handler(commands=['stats'])
@@ -333,10 +417,11 @@ def stats(message):
                 cur.execute("SELECT COUNT(*) FROM tasks")
                 total_days = cur.fetchone()['count']
             release_db(conn)
+    username = f"@{user.get('username')}" if user.get('username') else "друг"
     send_menu(
         message.chat.id,
         user,
-        f"📊 Статистика:\n📅 День: {user.get('day')}/{total_days}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}"
+        f"📊 Статистика, {username}:\n📅 День: *{user.get('day')}/{total_days}*\n🔥 Серия: *{user.get('streak') or 0} дней подряд*\n🌐 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*\n{ach_text}"
     )
 
 # Команда /all_stats (только для админа)
@@ -350,7 +435,7 @@ def all_stats(message):
     with DB_LOCK:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT chat_id, username, day, streak FROM users ORDER BY day DESC LIMIT 500;")
+                cur.execute("SELECT chat_id, username, day, streak, timezone FROM users ORDER BY day DESC LIMIT 500;")
                 users = cur.fetchall()
             release_db(conn)
 
@@ -361,24 +446,38 @@ def all_stats(message):
     text = "👥 Статистика по пользователям (макс 500):\n"
     for u in users:
         uname = f"@{u['username']}" if u.get('username') else u['chat_id']
-        text += f"- {uname}: день {u.get('day')}, серия {u.get('streak')} дней\n"
+        text += f"- {uname}: день {u.get('day')}, серия {u.get('streak')} дней, часовой пояс {u.get('timezone')}\n"
     send_message_with_rate_limit(message.chat.id, text)
 
 # Обработка инлайн-кнопок
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline_buttons(call):
     chat_id = call.message.chat.id
+    current_time = time.time()
+    user_key = f"{chat_id}_{call.data}"
+
+    # Проверка на спам кнопками
+    if user_key in last_callback_time and current_time - last_callback_time[user_key] < 2:
+        send_message_with_rate_limit(chat_id, "⏳ Пожалуйста, подожди немного перед повторным нажатием.")
+        return
+    last_callback_time[user_key] = current_time
+
     init_user(chat_id, call.from_user.username)
     user = get_user(chat_id)
     data = call.data
+    username = f"@{user.get('username')}" if user.get('username') else "друг"
 
+    # Проверка возраста callback-запроса
     try:
-        bot.answer_callback_query(call.id)
+        callback_time = pendulum.from_timestamp(call.message.date, tz=user.get('timezone', DEFAULT_TIMEZONE))
+        if (pendulum.now(user.get('timezone', DEFAULT_TIMEZONE)) - callback_time).total_seconds() < 10:
+            bot.answer_callback_query(call.id)
     except Exception as e:
-        logging.warning(f"Ошибка callback: {e}")
+        logging.warning(f"Ошибка callback для {chat_id}: {e}")
 
     if data == "today":
-        send_menu(chat_id, user, f"📌 Сегодня: {get_task(user)}")
+        send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
+        send_message_with_rate_limit(chat_id, "✅ Задание показано!")
 
     elif data == "next":
         task, achievements, user = next_task(user)
@@ -388,10 +487,14 @@ def handle_inline_buttons(call):
                     cur.execute("SELECT COUNT(*) FROM tasks")
                     total_days = cur.fetchone()['count']
                 release_db(conn)
-        text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {user.get('streak')} дней\n📅 День {user.get('day')}/{total_days}"
+        text = f"➡️ Следующее задание, {username}!\n{task}\n\n🔥 Серия: *{user.get('streak')} дней*\n📅 День *{user.get('day')}/{total_days}*"
         send_menu(chat_id, user, text)
         for ach in achievements:
-            send_message_with_rate_limit(chat_id, f"🎉 {ach}")
+            send_message_with_rate_limit(
+                chat_id,
+                f"🎉 {ach}\n\n_{random.choice(MOTIVATIONAL_QUOTES)}_",
+                parse_mode="Markdown"
+            )
 
     elif data == "stats":
         ach_list = []
@@ -410,34 +513,60 @@ def handle_inline_buttons(call):
         send_menu(
             chat_id,
             user,
-            f"📊 Статистика:\n📅 День: {user.get('day')}/{total_days}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}"
+            f"📊 Статистика, {username}:\n📅 День: *{user.get('day')}/{total_days}*\n🔥 Серия: *{user.get('streak') or 0} дней подряд*\n🌐 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*\n{ach_text}"
         )
 
     elif data == "subscribe":
         update_user(chat_id, subscribed=True)
         user = get_user(chat_id)
-        send_menu(chat_id, user, "✅ Напоминания включены! Буду писать в установленное время.")
+        send_menu(
+            chat_id,
+            user,
+            f"✅ Напоминания включены, {username}! Буду писать в {REMINDER_HOUR} по твоему часовому поясу (*{user.get('timezone', DEFAULT_TIMEZONE)}*)."
+        )
 
     elif data == "unsubscribe":
         update_user(chat_id, subscribed=False)
         user = get_user(chat_id)
-        send_menu(chat_id, user, "❌ Ты отписался от напоминаний.")
+        send_menu(chat_id, user, f"❌ Ты отписался от напоминаний, {username}.")
 
     elif data == "help":
         send_menu(
             chat_id,
             user,
-            "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
+            f"ℹ Помощь, {username}:\n"
             "📅 — показать задание на сегодня\n"
             "✅ — отметить выполнение\n"
             "📊 — статистика\n"
-            "🔔 — подписка на напоминания\n\n"
+            "🔔 — подписка на напоминания\n"
+            "🌐 — настройка часового пояса\n"
+            "/reset — сбросить прогресс\n"
+            "/settimezone — выбрать часовой пояс\n\n"
             "🎯 Выполняя задания подряд, ты будешь получать достижения!"
         )
 
+    elif data == "set_timezone":
+        text = f"🌐 Выбери часовой пояс для напоминаний, {username} (текущий: {user.get('timezone', DEFAULT_TIMEZONE)}):"
+        send_message_with_rate_limit(chat_id, text, reply_markup=get_timezone_keyboard())
+
+    elif data.startswith("tz_"):
+        new_timezone = data[3:]
+        if new_timezone in TIMEZONES:
+            update_user(chat_id, timezone=new_timezone)
+            user = get_user(chat_id)
+            send_menu(
+                chat_id,
+                user,
+                f"🌐 Часовой пояс установлен: *{new_timezone}*\n\nНапоминания будут приходить в {REMINDER_HOUR} по твоему времени."
+            )
+        else:
+            send_message_with_rate_limit(chat_id, "⚠ Неверный часовой пояс. Попробуй снова.")
+
+    elif data == "back_to_menu":
+        send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
+
 # Планировщик напоминаний
 def send_scheduled_task():
-    now = pendulum.now(TIMEZONE)
     with DB_LOCK:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -447,16 +576,32 @@ def send_scheduled_task():
 
     for user in subs:
         try:
+            user_tz = user.get('timezone', DEFAULT_TIMEZONE)
+            now = pendulum.now(user_tz)
             task = get_task(user)
+            username = f"@{user.get('username')}" if user.get('username') else "друг"
             send_message_with_rate_limit(
                 user['chat_id'],
-                f"📌 Напоминание ({now.to_formatted_date_string()}):\n{task}\n\nЕсли выполнил(а) — открой бот и нажми ✅."
+                f"📌 Напоминание, {username} ({now.to_formatted_date_string()}):\n{task}\n\n_{random.choice(MOTIVATIONAL_QUOTES)}_",
+                parse_mode="Markdown"
             )
         except Exception as e:
             logging.error(f"Ошибка в запланированном задании для {user['chat_id']}: {e}")
+            send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в напоминании для {user['chat_id']}: {e}")
 
 def schedule_checker():
     while True:
+        with DB_LOCK:
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT DISTINCT timezone FROM users WHERE subscribed = TRUE;")
+                    timezones = [row['timezone'] for row in cur.fetchall()]
+                release_db(conn)
+
+        for tz in timezones:
+            now = pendulum.now(tz)
+            if now.strftime("%H:%M") == REMINDER_HOUR:
+                send_scheduled_task()
         schedule.run_pending()
         time.sleep(30)
 
@@ -476,6 +621,7 @@ def webhook():
         return '', 200
     except Exception as e:
         logging.error(f"Ошибка обработки вебхука: {e}")
+        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка вебхука: {e}")
         return '', 400
 
 @app.route('/')
@@ -488,7 +634,6 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
 
-    schedule.every().day.at(REMINDER_HOUR).do(send_scheduled_task)
     schedule.every().week.do(cleanup_inactive_users)
     threading.Thread(target=schedule_checker, daemon=True).start()
 
