@@ -11,9 +11,29 @@ from psycopg2.extras import RealDictCursor
 from telebot import types
 from datetime import datetime, timedelta, timezone
 from html import escape
-from ratelimiter import RateLimiter
 import pendulum
 import random
+from collections import deque
+from time import monotonic
+
+# Кастомный ограничитель скорости
+class RateLimiter:
+    def __init__(self, max_calls, period):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = deque()
+
+    def __enter__(self):
+        while len(self.calls) >= self.max_calls:
+            if monotonic() - self.calls[0] > self.period:
+                self.calls.popleft()
+            else:
+                time.sleep(self.period - (monotonic() - self.calls[0]))
+        self.calls.append(monotonic())
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 # Настройка логирования с ротацией
 log_handler = logging.handlers.RotatingFileHandler('bot.log', maxBytes=10*1024*1024, backupCount=5)
