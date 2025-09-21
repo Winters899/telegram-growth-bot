@@ -1,6 +1,6 @@
-pyTelegramBotAPI==4.29.1
-psycopg2-binary==2.9.10
-Flask==3.1.2
-pendulum==3.1.0
-apscheduler==3.10.4
-gunicorn==23.0.0
+pyTelegramBotAPI
+psycopg2-binary
+Flask
+pendulum
+apscheduler
+gunicorn
