@@ -1,5 +1,6 @@
 flask 
-python-telegram-bot psycopg2-binary
+python-telegram-bot 
+psycopg2-binary
 pendulum
 apscheduler
 requests
