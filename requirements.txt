@@ -1,6 +1,7 @@
-telebot
-psycopg2-binary
-flask
+pyTelegramBotAPI 
+psycopg2-binary 
+Flask 
+pendulum 
+schedule 
+apscheduler 
 gunicorn
-apscheduler
-SQLAlchemy
