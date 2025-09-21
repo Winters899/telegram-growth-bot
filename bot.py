@@ -1,10 +1,11 @@
 import os
 import json
 import logging
+import time
 import pendulum
 from flask import Flask, request, jsonify
-from telebot import TeleBot, types
-from telebot.util import escape_markdown
+from telebot import TeleBot
+from telebot.types import Update, escape_markdown
 from telebot.apihelper import ApiTelegramException
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
@@ -18,10 +19,15 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL') or (f'https://{RENDER_EXTERNAL_HOSTNAME}/webhook' if RENDER_EXTERNAL_HOSTNAME else None)
-ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '0') or 0)
+try:
+    ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '0'))
+except ValueError:
+    logging.error("Invalid TELEGRAM_ADMIN_ID", extra={'value': os.getenv('TELEGRAM_ADMIN_ID')})
+    ADMIN_ID = 0
 WEBHOOK_WORKER = os.getenv('WEBHOOK_WORKER', '1')
 
 if not BOT_TOKEN or not DATABASE_URL or not WEBHOOK_URL:
+    logging.error("Missing required environment variables", extra={'BOT_TOKEN': bool(BOT_TOKEN), 'DATABASE_URL': bool(DATABASE_URL), 'WEBHOOK_URL': bool(WEBHOOK_URL)})
     raise RuntimeError('Не заданы BOT_TOKEN, DATABASE_URL или WEBHOOK_URL')
 
 # -----------------------
@@ -135,6 +141,7 @@ def send_message_safe(chat_id, text, **kwargs):
         if e.error_code == 429:
             sleep_time = e.result_json.get('parameters', {}).get('retry_after', 1)
             logger.warning("Rate limit hit, sleeping", extra={'sleep_s': sleep_time})
+            time.sleep(sleep_time)
             return None
         elif e.error_code == 403:
             logger.warning("Bot blocked by user", extra={'chat_id': chat_id})
@@ -149,20 +156,23 @@ def send_message_safe(chat_id, text, **kwargs):
 # -----------------------
 # Операции с БД
 # -----------------------
-def get_user(chat_id):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute('SELECT chat_id, username FROM users WHERE chat_id = %s', (chat_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {'chat_id': row[0], 'username': row[1]}
-    except Exception as e:
-        logger.exception("get_user failed", extra={'chat_id': chat_id, 'error': str(e)})
-        return None
-    finally:
-        put_conn(conn)
+def get_user(chat_id, retries=3, delay=1):
+    for attempt in range(retries):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute('SELECT chat_id, username FROM users WHERE chat_id = %s', (chat_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {'chat_id': row[0], 'username': row[1]}
+        except psycopg2.OperationalError as e:
+            logger.warning(f"DB error, retrying {attempt+1}/{retries}", extra={'error': str(e)})
+            time.sleep(delay)
+        finally:
+            put_conn(conn)
+    logger.error("Failed to get user after retries", extra={'chat_id': chat_id})
+    return None
 
 def update_user(chat_id, username):
     conn = get_conn()
@@ -187,6 +197,8 @@ def update_user(chat_id, username):
 def start(message):
     chat_id = message.chat.id
     username = message.from_user.username or "друг"
+    if not username.isalnum():
+        username = "друг"
     logger.info("/start command", extra={'chat_id': chat_id, 'username': username})
     update_user(chat_id, username)
     safe_username = escape_markdown(username, version=2)
@@ -200,7 +212,16 @@ def stats(message):
     if not user:
         send_message_safe(chat_id, escape_markdown("⚠ Сначала начни с /start", version=2), parse_mode="MarkdownV2")
         return
-    send_message_safe(chat_id, escape_markdown(f"📊 Статистика для @{user['username']}: Пока нет данных!", version=2), parse_mode="MarkdownV2")
+    safe_username = escape_markdown(user['username'] or "друг", version=2)
+    send_message_safe(chat_id, f"📊 Статистика для @{safe_username}: Пока нет данных!", parse_mode="MarkdownV2")
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    chat_id = message.chat.id
+    logger.info("/help command", extra={'chat_id': chat_id})
+    send_message_safe(chat_id, escape_markdown(
+        "Доступные команды:\n/start - Начать работу с ботом\n/stats - Показать статистику\n/help - Показать это сообщение",
+        version=2), parse_mode="MarkdownV2")
 
 # -----------------------
 # Webhook
@@ -214,10 +235,7 @@ def setup_webhook():
             notify_admin_safe("❌ Не удалось установить вебхук")
     except Exception as e:
         logger.exception("Webhook setup failed", extra={'error': str(e)})
-        notify_admin_safe("⚠ Ошибка установки вебхука")
-
-if WEBHOOK_WORKER == '1':
-    setup_webhook()
+        notify_admin_safe(f"⚠ Ошибка установки вебхука: {str(e)[:100]}")
 
 # -----------------------
 # Flask routes
@@ -230,7 +248,7 @@ def webhook():
             logger.warning("Empty webhook payload", extra={'headers': dict(request.headers)})
             return '', 400
         logger.debug("Webhook received", extra={'payload': raw[:500]})
-        update = types.Update.de_json(raw)
+        update = Update.de_json(raw)
         if not update:
             logger.error("Failed to parse webhook update", extra={'raw': raw[:500]})
             return '', 400
@@ -245,13 +263,24 @@ def webhook():
 def index():
     return jsonify({'status': 'ok', 'pid': os.getpid(), 'webhook_url': WEBHOOK_URL})
 
+@app.route('/webhook_status')
+def webhook_status():
+    try:
+        info = bot.get_webhook_info()
+        return jsonify({'status': 'ok', 'webhook_info': info.to_dict()})
+    except Exception as e:
+        logger.exception("Webhook status check failed", extra={'error': str(e)})
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
 # -----------------------
 # Инициализация
 # -----------------------
 try:
     init_db()
+    if WEBHOOK_WORKER == '1':
+        setup_webhook()
+    logger.info("Bot started", extra={'pid': os.getpid()})
 except Exception as e:
     logger.exception("Fatal DB init error", extra={'error': str(e)})
+    notify_admin_safe(f"⚠ Bot failed to start: {str(e)[:100]}")
     raise
-
-logger.info("Bot started", extra={'pid': os.getpid()})
