@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import logging
 import random
@@ -5,7 +6,6 @@ from time import sleep
 from flask import Flask, request
 from telebot import TeleBot, types
 from telebot.util import escape_markdown
-import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 import pendulum
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -14,23 +14,25 @@ from threading import Lock
 import atexit
 import requests
 
-# --- Настройка логирования ---
+# --- ЛОГИ ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# --- Переменные окружения ---
+# --- ОКРУЖЕНИЕ ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '0') or 0)
 DEFAULT_TIMEZONE = os.getenv('BOT_TIMEZONE', 'UTC')
 REMINDER_HOUR = os.getenv('REMINDER_HOUR', '09:00')
+WEBHOOK_CHECK_INTERVAL = int(os.getenv('WEBHOOK_CHECK_INTERVAL', 10))
 
 WEBHOOK_URL = f'https://{RENDER_EXTERNAL_HOSTNAME}/webhook' if RENDER_EXTERNAL_HOSTNAME else None
+
 if not BOT_TOKEN or not DATABASE_URL:
-    logging.error('Ошибка запуска: BOT_TOKEN или DATABASE_URL должны быть установлены')
+    logging.error("❌ BOT_TOKEN и DATABASE_URL должны быть заданы")
     raise SystemExit(1)
 
 # --- Flask и TeleBot ---
@@ -74,7 +76,7 @@ class RateLimiter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 
-rate_limiter = RateLimiter(max_calls=60, period=60)
+rate_limiter = RateLimiter()
 
 # --- Уведомления ---
 def notify_admin_safe(text):
@@ -85,19 +87,16 @@ def notify_admin_safe(text):
             logging.error(f"Не удалось уведомить админа: {e}")
 
 def send_message_with_rate_limit(chat_id, text, **kwargs):
-    logging.info(f"Attempting to send message to chat_id={chat_id}, text={text[:50]}...")
     with rate_limiter:
         last_exc = None
         for attempt in range(5):
             try:
-                msg = bot.send_message(chat_id, text, **kwargs)
-                logging.info(f"Message sent to chat_id={chat_id}, message_id={getattr(msg, 'message_id', None)}")
-                return msg
+                return bot.send_message(chat_id, text, **kwargs)
             except Exception as e:
                 last_exc = e
-                logging.warning(f"Attempt {attempt+1}/5 failed for chat_id={chat_id}: {e}")
+                logging.warning(f"Попытка {attempt+1}/5 не удалась: {e}")
                 sleep(2 ** attempt)
-        logging.error(f"Failed to send message to chat_id={chat_id} after 5 attempts: {last_exc}")
+        logging.error(f"Ошибка отправки сообщения {chat_id}: {last_exc}")
         if chat_id != ADMIN_ID:
             notify_admin_safe(f"⚠ Ошибка отправки сообщения для {chat_id}: {str(last_exc)[:200]}")
         return None
@@ -128,10 +127,9 @@ def init_db():
             ''')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_tasks_chat_id_date ON tasks (chat_id, task_date)')
         conn.commit()
-        logging.info('Схема базы данных инициализирована.')
     except Exception as e:
-        logging.error(f'Ошибка инициализации базы данных: {e}')
-        notify_admin_safe(f'⚠ Ошибка инициализации базы данных: {e}')
+        logging.error(f'Ошибка init_db: {e}')
+        notify_admin_safe(f'⚠ Ошибка init_db: {e}')
         raise
     finally:
         put_conn(conn)
@@ -140,7 +138,7 @@ def get_user(chat_id):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute('SELECT chat_id, username, timezone, subscribed, last_menu_message_id FROM users WHERE chat_id = %s', (chat_id,))
+            cur.execute('SELECT chat_id, username, timezone, subscribed, last_menu_message_id FROM users WHERE chat_id=%s', (chat_id,))
             user = cur.fetchone()
         return {
             'chat_id': user[0],
@@ -149,9 +147,6 @@ def get_user(chat_id):
             'subscribed': user[3],
             'last_menu_message_id': user[4]
         } if user else None
-    except Exception as e:
-        logging.error(f'Ошибка get_user для chat_id={chat_id}: {e}')
-        return None
     finally:
         put_conn(conn)
 
@@ -159,104 +154,54 @@ def update_user(chat_id, **kwargs):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            if kwargs:
-                fields = ', '.join(f'{k} = %s' for k in kwargs)
-                values = list(kwargs.values()) + [chat_id]
-                cur.execute(f'UPDATE users SET {fields} WHERE chat_id = %s', values)
-
-            if cur.rowcount == 0:
-                cur.execute('''
-                    INSERT INTO users (chat_id, username, timezone, subscribed, last_menu_message_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (chat_id) DO UPDATE SET
-                      username = EXCLUDED.username,
-                      timezone = EXCLUDED.timezone,
-                      subscribed = EXCLUDED.subscribed,
-                      last_menu_message_id = EXCLUDED.last_menu_message_id
-                ''', (
-                    chat_id,
-                    kwargs.get('username'),
-                    kwargs.get('timezone', DEFAULT_TIMEZONE),
-                    kwargs.get('subscribed', False),
-                    kwargs.get('last_menu_message_id')
-                ))
+            cur.execute('''
+                INSERT INTO users (chat_id, username, timezone, subscribed, last_menu_message_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    username=EXCLUDED.username,
+                    timezone=EXCLUDED.timezone,
+                    subscribed=EXCLUDED.subscribed,
+                    last_menu_message_id=EXCLUDED.last_menu_message_id
+            ''', (
+                chat_id,
+                kwargs.get('username'),
+                kwargs.get('timezone', DEFAULT_TIMEZONE),
+                kwargs.get('subscribed', False),
+                kwargs.get('last_menu_message_id')
+            ))
         conn.commit()
-        logging.info(f'Пользователь chat_id={chat_id} обновлён/создан')
     except Exception as e:
-        logging.error(f'Ошибка update_user для chat_id={chat_id}: {e}')
+        logging.error(f"Ошибка update_user: {e}")
     finally:
         put_conn(conn)
 
-def add_task(chat_id, task_date, completed=False):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute('INSERT INTO tasks (chat_id, task_date, completed) VALUES (%s, %s, %s)', (chat_id, task_date, completed))
-        conn.commit()
-        logging.info(f'Задача добавлена для chat_id={chat_id}, task_date={task_date}')
-    except Exception as e:
-        logging.error(f'Ошибка add_task для chat_id={chat_id}: {e}')
-    finally:
-        put_conn(conn)
-
-def get_tasks(chat_id, start_date, end_date):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute('SELECT task_date, completed FROM tasks WHERE chat_id = %s AND task_date BETWEEN %s AND %s ORDER BY task_date', (chat_id, start_date, end_date))
-            tasks = cur.fetchall()
-        return [{'task_date': t[0], 'completed': t[1]} for t in tasks]
-    except Exception as e:
-        logging.error(f'Ошибка get_tasks для chat_id={chat_id}: {e}')
-        return []
-    finally:
-        put_conn(conn)
-
-def cleanup_inactive_users():
-    conn = get_conn()
-    try:
-        cutoff = pendulum.now('UTC').subtract(months=1)
-        with conn.cursor() as cur:
-            cur.execute('DELETE FROM users WHERE created_at < %s AND subscribed = FALSE', (cutoff,))
-        conn.commit()
-        logging.info("Неактивные пользователи удалены")
-    except Exception as e:
-        logging.error(f"Ошибка cleanup_inactive_users: {e}")
-        notify_admin_safe(f"⚠ Ошибка очистки пользователей: {e}")
-    finally:
-        put_conn(conn)
-
-# --- Мотивационные цитаты ---
+# --- Мотивация ---
 MOTIVATIONAL_QUOTES = [
     "Каждый день — новый шанс стать лучше!",
     "Маленькие шаги приводят к большим целям!",
     "Ты сильнее, чем думаешь!",
 ]
 
-# --- Клавиатура ---
-def get_inline_keyboard(user):
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton('✅ Сегодня', callback_data='today'),
-        types.InlineKeyboardButton('📅 Следующий день', callback_data='next')
-    )
-    subscribe_text = '🔕 Отписаться' if user.get('subscribed', False) else '🔔 Подписаться'
-    keyboard.add(types.InlineKeyboardButton(subscribe_text, callback_data='subscribe'))
-    keyboard.add(types.InlineKeyboardButton('📊 Статистика', callback_data='stats'))
-    keyboard.add(types.InlineKeyboardButton('🌍 Часовой пояс', callback_data='settimezone'))
-    return keyboard
-
 # --- Меню ---
+def get_inline_keyboard(user):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("✅ Сегодня", callback_data="today"),
+        types.InlineKeyboardButton("📅 Следующий день", callback_data="next")
+    )
+    sub_text = "🔕 Отписаться" if user.get("subscribed") else "🔔 Подписаться"
+    kb.add(types.InlineKeyboardButton(sub_text, callback_data="subscribe"))
+    kb.add(types.InlineKeyboardButton("📊 Статистика", callback_data="stats"))
+    kb.add(types.InlineKeyboardButton("🌍 Часовой пояс", callback_data="settimezone"))
+    return kb
+
 def send_menu(chat_id, user, text):
-    logging.info(f"Sending menu to chat_id={chat_id}, text={text[:50]}...")
+    fresh_user = get_user(chat_id) or user or {'subscribed': False, 'timezone': DEFAULT_TIMEZONE}
+    prev_id = fresh_user.get("last_menu_message_id")
+    motivation = random.choice(MOTIVATIONAL_QUOTES)
+    formatted_text = f"*{escape_markdown(text, version=2)}*\n\n_{escape_markdown(motivation, version=2)}_"
+
     try:
-        fresh_user = get_user(chat_id) or user or {'subscribed': False, 'timezone': DEFAULT_TIMEZONE}
-        prev_id = fresh_user.get('last_menu_message_id')
-        username = f"@{fresh_user.get('username')}" if fresh_user.get('username') else "друг"
-        motivation = random.choice(MOTIVATIONAL_QUOTES)
-
-        formatted_text = f"*{escape_markdown(text, version=2)}*\n\n_{escape_markdown(motivation, version=2)}_"
-
         if prev_id:
             try:
                 bot.edit_message_text(
@@ -266,10 +211,8 @@ def send_menu(chat_id, user, text):
                     parse_mode="MarkdownV2",
                     reply_markup=get_inline_keyboard(fresh_user)
                 )
-                logging.info(f"Menu updated for chat_id={chat_id}, message_id={prev_id}")
                 return
-            except Exception as e:
-                logging.warning(f"Failed to update menu message_id={prev_id} for chat_id={chat_id}: {e}")
+            except:
                 update_user(chat_id, last_menu_message_id=None)
 
         msg = send_message_with_rate_limit(
@@ -280,122 +223,67 @@ def send_menu(chat_id, user, text):
         )
         if msg:
             update_user(chat_id, last_menu_message_id=msg.message_id)
-            logging.info(f"Menu sent for chat_id={chat_id}, message_id={msg.message_id}")
     except Exception as e:
-        logging.error(f"Error in send_menu for chat_id={chat_id}: {e}")
-        try:
-            send_message_with_rate_limit(chat_id, escape_markdown("⚠ Что-то пошло не так. Попробуй позже!", version=2), parse_mode="MarkdownV2")
-        except Exception:
-            notify_admin_safe(f"⚠ Ошибка send_menu для {chat_id}: {e}")
+        logging.error(f"Ошибка send_menu: {e}")
+        send_message_with_rate_limit(chat_id, "⚠ Что-то пошло не так.", parse_mode="MarkdownV2")
 
-# --- Команды и callbacks ---
+# --- Команды ---
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
     username = message.from_user.username or "друг"
-    logging.info(f"Processing /start for chat_id={chat_id}, username=@{username}")
     update_user(chat_id, username=username)
-    safe_username = escape_markdown(username, version=2)
-    send_menu(chat_id, None, f"Привет, @{safe_username}! 👋 Я твой наставник по привычкам.")
-
-@bot.message_handler(commands=['stats'])
-def stats(message):
-    chat_id = message.chat.id
-    user = get_user(chat_id)
-    if not user:
-        send_message_with_rate_limit(chat_id, escape_markdown("⚠ Сначала начни с /start", version=2), parse_mode="MarkdownV2")
-        return
-    start_date = pendulum.now(user['timezone']).subtract(weeks=1).date()
-    end_date = pendulum.now(user['timezone']).date()
-    tasks = get_tasks(chat_id, start_date, end_date)
-    completed = sum(1 for t in tasks if t['completed'])
-    total = len(tasks)
-    percentage = (completed / total * 100) if total > 0 else 0
-    text = f"📊 Статистика за неделю:\n✅ Выполнено: {completed}/{total} ({percentage:.1f}%)"
-    send_message_with_rate_limit(chat_id, escape_markdown(text, version=2), parse_mode="MarkdownV2")
-
-@bot.message_handler(commands=['all_stats'])
-def all_stats(message):
-    chat_id = message.chat.id
-    if chat_id != ADMIN_ID:
-        logging.warning(f"Unauthorized /all_stats attempt by chat_id={chat_id}")
-        return
-    logging.info("Processing /all_stats")
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute('SELECT COUNT(*) FROM users WHERE subscribed = TRUE')
-            subscribed = cur.fetchone()[0]
-            cur.execute('SELECT COUNT(*) FROM tasks WHERE completed = TRUE')
-            completed = cur.fetchone()[0]
-            cur.execute('SELECT COUNT(*) FROM tasks')
-            total = cur.fetchone()[0]
-        percentage = (completed / total * 100) if total > 0 else 0
-        text = f"📊 Общая статистика:\n👥 Подписчиков: {subscribed}\n✅ Выполнено задач: {completed}/{total} ({percentage:.1f}%)"
-        send_message_with_rate_limit(chat_id, escape_markdown(text, version=2), parse_mode="MarkdownV2")
-    except Exception as e:
-        logging.error(f"Ошибка all_stats: {e}")
-        notify_admin_safe(f"⚠ Ошибка all_stats: {e}")
-        send_message_with_rate_limit(chat_id, escape_markdown(f"⚠ Ошибка: {e}", version=2), parse_mode="MarkdownV2")
-    finally:
-        put_conn(conn)
+    send_menu(chat_id, None, f"Привет, @{username}! 👋 Я твой наставник по привычкам.")
 
 # --- Планировщик ---
 scheduler = BackgroundScheduler()
 try:
-    hour, minute = map(int, REMINDER_HOUR.split(':'))
-except Exception:
+    hour, minute = map(int, REMINDER_HOUR.split(":"))
+except:
     hour, minute = 9, 0
-scheduler.add_job(cleanup_inactive_users, 'cron', hour=0, minute=0, timezone='UTC')
-for tz in ['Europe/Moscow', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'UTC']:
-    scheduler.add_job(
-        lambda tz=tz: send_menu_for_tz(tz),
-        CronTrigger(hour=hour, minute=minute, timezone=tz)
-    )
-scheduler.start()
-
-def send_menu_for_tz(timezone):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute('SELECT chat_id FROM users WHERE subscribed = TRUE AND timezone = %s', (timezone,))
-            users = cur.fetchall()
-        for (chat_id,) in users:
-            send_menu(chat_id, None, "🔔 Напоминание! Время работать над привычками!")
-    except Exception as e:
-        logging.error(f"Ошибка напоминаний для {timezone}: {e}")
-        notify_admin_safe(f"⚠ Ошибка напоминаний для {timezone}: {e}")
-    finally:
-        put_conn(conn)
+scheduler.add_job(lambda: cleanup_inactive_users(), 'cron', hour=0, minute=0, timezone="UTC")
 
 # --- Webhook ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    try:
-        update = types.Update.de_json(request.get_json())
-        if update:
-            bot.process_new_updates([update])
-            return '', 200
-        return '', 400
-    except Exception as e:
-        logging.error(f"Ошибка обработки webhook: {e}")
-        return '', 500
+    update = types.Update.de_json(request.get_json())
+    if update:
+        bot.process_new_updates([update])
+    return "", 200
 
 @app.route('/')
 def index():
-    return 'Привет, я жив!'
+    return "Бот работает!"
 
-# --- Точка входа ---
-if __name__ == '__main__':
+# --- Ensure Webhook ---
+def ensure_webhook(max_retries=3, delay=3):
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo").json()
+            if resp.get("ok"):
+                info = resp["result"]
+                if not info.get("url"):
+                    bot.set_webhook(url=WEBHOOK_URL)
+                    sleep(delay)
+                return True
+        except Exception as e:
+            logging.error(f"ensure_webhook ошибка: {e}")
+            notify_admin_safe(f"⚠ ensure_webhook ошибка: {e}")
+        sleep(delay)
+    return False
+
+# --- Запуск ---
+if __name__ == "__main__":
     init_db()
     if WEBHOOK_URL:
         try:
-            bot.remove_webhook()
-            bot.set_webhook(url=WEBHOOK_URL)
-            logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
+            bot.remove_webhook(drop_pending_updates=True)
+            sleep(1)
+            if bot.set_webhook(url=WEBHOOK_URL):
+                ensure_webhook()
+                scheduler.add_job(ensure_webhook, "interval", minutes=WEBHOOK_CHECK_INTERVAL)
+                scheduler.start()
         except Exception as e:
             logging.error(f"Ошибка установки webhook: {e}")
-            notify_admin_safe(f"⚠ Ошибка установки webhook: {e}")
-    else:
-        logging.info('WEBHOOK_URL не настроен — бот может работать в polling режиме (локально).')
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
+            notify_admin_safe(f"⚠ Ошибка webhook: {e}")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
