@@ -1,6 +1,25 @@
-Flask
-pyTelegramBotAPI
-psycopg2-binary
-pendulum
-APScheduler
-python-dotenv
+# WSGI сервер
+gunicorn==23.0.0
+
+# Flask и веб-сервер
+flask==3.0.3
+
+# Telegram Bot API
+pyTelegramBotAPI==4.22.1
+
+# PostgreSQL
+psycopg2-binary==2.9.9
+
+# Планировщик задач
+APScheduler==3.10.4
+
+# Работа с датами и временем
+pendulum==3.0.0
+python-dateutil==2.9.0.post0
+
+# HTTP-запросы
+requests==2.32.3
+httpx==0.27.2
+
+# Для совместимости сборки
+setuptools>=70.0
