@@ -15,6 +15,9 @@ import pendulum
 import random
 from collections import deque
 from time import monotonic
+from statistics import mean
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # Кастомный ограничитель скорости
 class RateLimiter:
@@ -82,6 +85,9 @@ REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
 # Кэш для предотвращения спама кнопками
 last_callback_time = {}
 
+# Кэш для отслеживания задержек callback
+callback_delays = deque(maxlen=100)
+
 # Мотивационные цитаты
 MOTIVATIONAL_QUOTES = [
     "Каждый шаг приближает тебя к цели! 🚀",
@@ -101,7 +107,7 @@ TIMEZONES = [
     "UTC"
 ]
 
-# Список заданий (для начальной загрузки в БД)
+# Список заданий
 TASKS = [
     "День 1: Определи 10 ключевых целей на ближайший год.",
     "День 2: Составь утренний ритуал (вода, зарядка, визуализация).",
@@ -150,11 +156,10 @@ def get_db():
 def release_db(conn):
     DATABASE_POOL.putconn(conn)
 
-# Инициализация базы данных
+# Инициализация базы данных с индексами
 def init_db():
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Создание таблицы users
             cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 chat_id BIGINT PRIMARY KEY,
@@ -168,23 +173,25 @@ def init_db():
                 timezone TEXT DEFAULT %s
             );
             """, (DEFAULT_TIMEZONE,))
-            # Создание таблицы tasks
             cur.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 day INTEGER PRIMARY KEY,
                 description TEXT NOT NULL
             );
             """)
-            # Загрузка заданий в таблицу tasks, если она пуста
             cur.execute("SELECT COUNT(*) FROM tasks")
             if cur.fetchone()['count'] == 0:
                 for i, task in enumerate(TASKS, 1):
                     cur.execute("INSERT INTO tasks (day, description) VALUES (%s, %s)", (i, task))
-            # Миграция: добавление колонки timezone, если её нет
-            cur.execute("DO $$   BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END   $$;", (DEFAULT_TIMEZONE,))
+            cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END $$;", (DEFAULT_TIMEZONE,))
+            # Добавление индексов
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_id ON users (chat_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_timezone ON users (timezone);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_subscribed ON users (subscribed);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_day ON tasks (day);")
             conn.commit()
         release_db(conn)
-    logging.info("Схема базы данных инициализирована.")
+    logging.info("Схема базы данных инициализирована с индексами.")
 
 init_db()
 
@@ -305,16 +312,13 @@ def get_inline_keyboard(user):
     current_day = user.get('day') or 1
     last_done = user.get('last_done')
     today = datetime.now(timezone.utc).date()
-    total_days = 30  # Можно динамически брать из таблицы tasks
+    total_days = 30
 
-    # Прогресс-бар
     progress = int((current_day / total_days) * 10)
     progress_bar = "[" + "█" * progress + " " * (10 - progress) + f"] {current_day}/{total_days}"
 
-    # Проверяем, выполнено ли задание сегодня
     can_mark_done = not last_done or last_done != today
 
-    # Основные кнопки
     buttons = [
         types.InlineKeyboardButton("📅 Сегодня", callback_data="today")
     ]
@@ -341,7 +345,7 @@ def get_timezone_keyboard():
     keyboard.add(types.InlineKeyboardButton("⬅ Назад", callback_data="back_to_menu"))
     return keyboard
 
-# Отправка сообщений с ограничением скорости и повторными попытками
+# Отправка сообщений с ограничением скорости
 def send_message_with_rate_limit(chat_id, text, **kwargs):
     with rate_limiter:
         for attempt in range(3):
@@ -367,7 +371,6 @@ def send_menu(chat_id, user, text):
                 logging.debug(f"Нет предыдущего меню для удаления в {chat_id}")
             update_user(chat_id, last_menu_message_id=None)
 
-        # Добавляем персонализированное приветствие и мотивацию
         username = f"@{fresh_user.get('username')}" if fresh_user.get('username') else "друг"
         motivation = random.choice(MOTIVATIONAL_QUOTES)
         formatted_text = f"**{text}**\n\n_{motivation}_"
@@ -488,13 +491,18 @@ def handle_inline_buttons(call):
     data = call.data
     username = f"@{user.get('username')}" if user.get('username') else "друг"
 
-    # Проверка возраста callback-запроса
+    # Проверка возраста callback с адаптивным порогом
     try:
-        callback_time = pendulum.from_timestamp(call.message.date, tz=user.get('timezone', DEFAULT_TIMEZONE))
-        time_diff = (pendulum.now(user.get('timezone', DEFAULT_TIMEZONE)) - callback_time).total_seconds()
-        if time_diff >= 10:
+        callback_time = pendulum.from_timestamp(call.message.date, tz='UTC')
+        request_time = pendulum.now('UTC')
+        time_diff = (request_time - callback_time).total_seconds()
+        callback_delays.append(time_diff)
+        adaptive_threshold = max(mean(callback_delays) + 5, 15) if callback_delays else 15
+        logging.info(f"Callback от {chat_id}: {data}, возраст {time_diff:.2f} сек, порог {adaptive_threshold:.2f} сек")
+        if time_diff >= adaptive_threshold:
             logging.info(f"Пропущен устаревший callback от {chat_id}: {data}, возраст {time_diff} секунд")
-            bot.answer_callback_query(call.id, text="Запрос устарел, попробуй снова.")
+            bot.answer_callback_query(call.id, text="Запрос устарел, отправляю новое меню.")
+            send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
             return
         bot.answer_callback_query(call.id)
     except Exception as e:
@@ -551,11 +559,13 @@ def handle_inline_buttons(call):
             user,
             f"✅ Напоминания включены, {username}! Буду писать в {REMINDER_HOUR} по твоему часовому поясу (*{user.get('timezone', DEFAULT_TIMEZONE)}*)."
         )
+        update_scheduler()  # Обновляем расписание при подписке
 
     elif data == "unsubscribe":
         update_user(chat_id, subscribed=False)
         user = get_user(chat_id)
         send_menu(chat_id, user, f"❌ Ты отписался от напоминаний, {username}.")
+        update_scheduler()  # Обновляем расписание при отписке
 
     elif data == "help":
         send_menu(
@@ -586,25 +596,27 @@ def handle_inline_buttons(call):
                 user,
                 f"🌐 Часовой пояс установлен: *{new_timezone}*\n\nНапоминания будут приходить в {REMINDER_HOUR} по твоему времени."
             )
+            update_scheduler()  # Обновляем расписание при смене часового пояса
         else:
             send_message_with_rate_limit(chat_id, "⚠ Неверный часовой пояс. Попробуй снова.")
 
     elif data == "back_to_menu":
         send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
 
-# Планировщик напоминаний
-def send_scheduled_task():
+# Планировщик напоминаний с APScheduler
+scheduler = BackgroundScheduler()
+
+def send_scheduled_task_for_tz(tz):
     with DB_LOCK:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE subscribed = TRUE;")
+                cur.execute("SELECT * FROM users WHERE subscribed = TRUE AND timezone = %s;", (tz,))
                 subs = cur.fetchall()
             release_db(conn)
 
     for user in subs:
         try:
-            user_tz = user.get('timezone', DEFAULT_TIMEZONE)
-            now = pendulum.now(user_tz)
+            now = pendulum.now(tz)
             task = get_task(user)
             username = f"@{user.get('username')}" if user.get('username') else "друг"
             send_message_with_rate_limit(
@@ -613,24 +625,26 @@ def send_scheduled_task():
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logging.error(f"Ошибка в запланированном задании для {user['chat_id']}: {e}")
+            logging.error(f"Ошибка в напоминании для {user['chat_id']} в {tz}: {e}")
             send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в напоминании для {user['chat_id']}: {e}")
 
-def schedule_checker():
-    while True:
-        with DB_LOCK:
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT DISTINCT timezone FROM users WHERE subscribed = TRUE;")
-                    timezones = [row['timezone'] for row in cur.fetchall()]
-                release_db(conn)
-
-        for tz in timezones:
-            now = pendulum.now(tz)
-            if now.strftime("%H:%M") == REMINDER_HOUR:
-                send_scheduled_task()
-        schedule.run_pending()
-        time.sleep(30)
+def update_scheduler():
+    with DB_LOCK:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT DISTINCT timezone FROM users WHERE subscribed = TRUE;")
+                timezones = [row['timezone'] for row in cur.fetchall()]
+            release_db(conn)
+    
+    scheduler.remove_all_jobs()
+    hour, minute = map(int, REMINDER_HOUR.split(':'))
+    for tz in timezones:
+        scheduler.add_job(
+            send_scheduled_task_for_tz,
+            CronTrigger(hour=hour, minute=minute, timezone=tz),
+            args=[tz]
+        )
+    logging.info(f"Обновлено расписание для {len(timezones)} часовых поясов")
 
 # Вебхук-сервер
 @app.route('/webhook', methods=['POST'])
@@ -664,5 +678,9 @@ if __name__ == '__main__':
     schedule.every().week.do(cleanup_inactive_users)
     threading.Thread(target=schedule_checker, daemon=True).start()
 
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    update_scheduler()
+    scheduler.start()
+
+    # Gunicorn запускается отдельно, поэтому убираем app.run()
+    # port = int(os.getenv("PORT", 10000))
+    # app.run(host='0.0.0.0', port=port)
