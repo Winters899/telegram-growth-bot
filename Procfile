@@ -1,1 +1,1 @@
-web: gunicorn --workers 4 --bind 0.0.0.0:$PORT bot:app
+web: gunicorn --workers 4 --bind 0.0.0.0:$PORT --log-level info bot:app
