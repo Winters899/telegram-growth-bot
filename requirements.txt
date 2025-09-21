@@ -1,6 +1,5 @@
 pyTelegramBotAPI
-Flask
 psycopg2-binary
-pendulum
-schedule
-gunicorn
+Flask
+pendulum schedule
+apscheduler gunicorn
