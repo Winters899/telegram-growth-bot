@@ -10,6 +10,7 @@ from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 import atexit
+from tasks import TASKS, ACHIEVEMENTS
 
 # Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,69 +24,33 @@ if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set.")
 bot = telebot.TeleBot(TOKEN)
 
-HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-if not HOSTNAME:
-    raise RuntimeError("RENDER_EXTERNAL_HOSTNAME is not set.")
-WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+if not WEBHOOK_URL:
+    HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not HOSTNAME:
+        raise RuntimeError("Either WEBHOOK_URL or RENDER_EXTERNAL_HOSTNAME must be set.")
+    WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
+
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
 if not ADMIN_ID:
     raise RuntimeError("TELEGRAM_ADMIN_ID is not set.")
+ADMIN_ID = str(ADMIN_ID)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set.")
 
 # Пул соединений с БД
-db_pool = ThreadedConnectionPool(1, 20, DATABASE_URL, sslmode='require')
+db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
 
-# Задания
-TASKS = [
-    "День 1: Определи 10 ключевых целей на ближайший год.",
-    "День 2: Составь утренний ритуал (вода, зарядка, визуализация).",
-    "День 3: Откажись от одной вредной привычки.",
-    "День 4: Веди дневник мыслей и благодарностей.",
-    "День 5: Составь список из 10 сильных сторон.",
-    "День 6: Сделай цифровой детокс на 6 часов.",
-    "День 7: Подведи итоги недели, отметь победы.",
-    "День 8: Применяй правило Парето 20/80.",
-    "День 9: Определи 3 главные приоритеты дня.",
-    "День 10: Используй технику Pomodoro (25/5).",
-    "День 11: Наведи порядок на рабочем месте.",
-    "День 12: Минимизируй отвлекающие факторы.",
-    "День 13: Сделай 2 часа глубокой работы.",
-    "День 14: Итоги недели: оцени продуктивность.",
-    "День 15: Напиши свою миссию и ценности.",
-    "День 16: Практикуй публичные мини-выступления.",
-    "День 17: Научись говорить «нет».",
-    "День 18: Прочитай биографию лидера.",
-    "День 19: Сделай доброе дело.",
-    "День 20: Визуализируй себя через 5 лет.",
-    "День 21: Итоги недели: оцени уверенность.",
-    "День 22: Составь план учёбы на 1 год.",
-    "День 23: Определи наставника.",
-    "День 24: Практикуй вечерний анализ.",
-    "День 25: Составь финансовую стратегию.",
-    "День 26: Сделай ревизию окружения.",
-    "День 27: Поделись знаниями.",
-    "День 28: Итоги: составь план на месяц.",
-    "День 29: Определи 3 долгосрочные мечты.",
-    "День 30: Создай карту жизни."
-]
-
-# Достижения
-ACHIEVEMENTS = {
-    5: "🏅 Молодец! 5 дней подряд!",
-    10: "🥈 Ты машина! 10 дней без перерыва!",
-    20: "🥇 Железная сила воли! 20 дней подряд!",
-    30: "👑 Герой челленджа! 30 дней!"
-}
 
 # Инициализация БД
 def init_db():
     conn = db_pool.getconn()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 chat_id BIGINT PRIMARY KEY,
@@ -107,8 +72,16 @@ def init_db():
         logging.error(f"Database initialization failed: {e}")
         raise
     finally:
-        cur.close()
-        db_pool.putconn(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                db_pool.putconn(conn)
+            except Exception:
+                pass
 
 init_db()
 
@@ -122,7 +95,7 @@ def release_db(conn):
 def init_user(chat_id, username=None):
     conn = get_db()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         user = cur.fetchone()
         if not user:
@@ -131,21 +104,37 @@ def init_user(chat_id, username=None):
     except Exception as e:
         logging.error(f"init_user error for {chat_id}: {e}")
     finally:
-        cur.close()
-        release_db(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 def get_user(chat_id):
     conn = get_db()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         return cur.fetchone()
     except Exception as e:
         logging.error(f"get_user error for {chat_id}: {e}")
         return None
     finally:
-        cur.close()
-        release_db(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 def update_user(chat_id, **kwargs):
     if not kwargs:
@@ -157,7 +146,7 @@ def update_user(chat_id, **kwargs):
         return
     conn = get_db()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         fields = ", ".join([f"{k} = %s" for k in safe_kwargs.keys()])
         values = list(safe_kwargs.values())
         values.append(chat_id)
@@ -166,8 +155,16 @@ def update_user(chat_id, **kwargs):
     except Exception as e:
         logging.error(f"update_user error for {chat_id}: {e}")
     finally:
-        cur.close()
-        release_db(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 # Логика заданий
 def get_task(user):
@@ -274,7 +271,7 @@ def all_stats(message):
         return
     conn = get_db()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT chat_id, username, day, streak FROM users ORDER BY day DESC LIMIT 500")
         users = cur.fetchall()
         text = "👥 Статистика по пользователям (макс 500):\n"
@@ -285,8 +282,16 @@ def all_stats(message):
     except Exception as e:
         logging.error(f"all_stats error: {e}")
     finally:
-        cur.close()
-        release_db(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline_buttons(call):
@@ -359,7 +364,7 @@ def handle_inline_buttons(call):
 def send_scheduled_task():
     conn = get_db()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE subscribed = TRUE")
         subs = cur.fetchall()
         for user in subs:
@@ -371,8 +376,16 @@ def send_scheduled_task():
     except Exception as e:
         logging.error(f"send_scheduled_task error: {e}")
     finally:
-        cur.close()
-        release_db(conn)
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if 'conn' in locals() and conn is not None:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 # Вебхук
 @app.route('/webhook', methods=['POST'])
@@ -385,17 +398,58 @@ def webhook():
         logging.error(f"Webhook error: {e}")
         return 'Bad Request', 400
 
-# Запуск
+
+@app.route('/health', methods=['GET'])
+def health():
+    return 'OK', 200
+
+
+@app.route('/admin/start', methods=['POST'])
+def admin_start():
+    """Manual trigger to start webhook and scheduler.
+    Secured by ADMIN_SECRET header `X-ADMIN-SECRET` or allowed from localhost when ADMIN_SECRET not set.
+    """
+    secret = request.headers.get('X-ADMIN-SECRET') or request.args.get('secret')
+    remote = request.remote_addr
+    if ADMIN_SECRET:
+        if not secret or secret != ADMIN_SECRET:
+            return 'Forbidden', 403
+    else:
+        # If no ADMIN_SECRET configured, only allow localhost
+        if remote not in ('127.0.0.1', '::1'):
+            return 'Forbidden', 403
+
+    try:
+        start_scheduler_and_webhook()
+        return 'Started', 200
+    except Exception as e:
+        logging.error(f"admin_start failed: {e}")
+        return 'Error', 500
+
+def start_scheduler_and_webhook():
+    logging.info("start_scheduler_and_webhook: starting")
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL)
+        logging.info(f"Webhook set: {WEBHOOK_URL}")
+
+        jobstores = {'default': SQLAlchemyJobStore(url=DATABASE_URL.replace('postgres://', 'postgresql://'))}
+        scheduler = BackgroundScheduler(jobstores=jobstores)
+        scheduler.add_job(send_scheduled_task, 'cron', hour=9, minute=0)
+        scheduler.start()
+        logging.info("Scheduler started")
+        atexit.register(lambda: scheduler.shutdown())
+    except Exception:
+        logging.exception("Failed to start scheduler or set webhook")
+
+
+# Для Gunicorn/Render: убедиться, что webhook и планировщик запускаются при первом запросе
+@app.before_first_request
+def _run_on_startup():
+    start_scheduler_and_webhook()
+
+
+# Локальный запуск для отладки
 if __name__ == '__main__':
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
-    logging.info(f"Webhook set: {WEBHOOK_URL}")
-
-    jobstores = {'default': SQLAlchemyJobStore(url=DATABASE_URL.replace('postgres://', 'postgresql://'))}
-    scheduler = BackgroundScheduler(jobstores=jobstores)
-    scheduler.add_job(send_scheduled_task, 'cron', hour=9, minute=0)
-    scheduler.start()
-    atexit.register(lambda: scheduler.shutdown())
-
-    # Gunicorn будет запускать приложение, app.run() только для локального тестирования
+    start_scheduler_and_webhook()
     # app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
