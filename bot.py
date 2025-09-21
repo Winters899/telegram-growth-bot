@@ -1,4 +1,5 @@
 import os
+import time  # Добавлен импорт модуля time
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
