@@ -6,18 +6,21 @@ from flask import Flask, request
 from telebot import TeleBot, types
 from telebot.util import escape_markdown
 import psycopg2
+from psycopg2.pool import SimpleConnectionPool
 import pendulum
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from threading import Lock
+import atexit
+import requests
 
-# Настройка логирования
+# --- Настройка логирования ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# Инициализация переменных окружения
+# --- Переменные окружения ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
@@ -30,11 +33,26 @@ if not BOT_TOKEN or not DATABASE_URL:
     logging.error('Ошибка запуска: BOT_TOKEN или DATABASE_URL должны быть установлены')
     raise SystemExit(1)
 
-# Инициализация бота и Flask
-bot = TeleBot(BOT_TOKEN)
+# --- Flask и TeleBot ---
 app = Flask(__name__)
+bot = TeleBot(BOT_TOKEN)
 
-# Инициализация RateLimiter
+# --- Пул соединений ---
+db_pool = SimpleConnectionPool(1, 10, DATABASE_URL)
+
+def get_conn():
+    return db_pool.getconn()
+
+def put_conn(conn):
+    db_pool.putconn(conn)
+
+@atexit.register
+def close_pool():
+    if db_pool:
+        db_pool.closeall()
+        logging.info("Все соединения с базой закрыты.")
+
+# --- RateLimiter ---
 class RateLimiter:
     def __init__(self, max_calls=60, period=60):
         self.max_calls = max_calls
@@ -45,7 +63,6 @@ class RateLimiter:
     def __enter__(self):
         with self.lock:
             now = pendulum.now().timestamp()
-            # keep only recent calls
             self.calls = [t for t in self.calls if now - t < self.period]
             if len(self.calls) >= self.max_calls:
                 wait = self.period - (now - self.calls[0])
@@ -57,9 +74,9 @@ class RateLimiter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 
-rate_limiter = RateLimiter(max_calls=60, period=60)  # 60 сообщений в минуту
+rate_limiter = RateLimiter(max_calls=60, period=60)
 
-# Безопасное уведомление админа (без ретраев)
+# --- Уведомления ---
 def notify_admin_safe(text):
     if ADMIN_ID:
         try:
@@ -67,7 +84,6 @@ def notify_admin_safe(text):
         except Exception as e:
             logging.error(f"Не удалось уведомить админа: {e}")
 
-# Отправка сообщений с учётом rate limiting и ретраев
 def send_message_with_rate_limit(chat_id, text, **kwargs):
     logging.info(f"Attempting to send message to chat_id={chat_id}, text={text[:50]}...")
     with rate_limiter:
@@ -86,117 +102,138 @@ def send_message_with_rate_limit(chat_id, text, **kwargs):
             notify_admin_safe(f"⚠ Ошибка отправки сообщения для {chat_id}: {str(last_exc)[:200]}")
         return None
 
-# Инициализация базы данных
+# --- Работа с БД ---
 def init_db():
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('''
-                    CREATE TABLE IF NOT EXISTS users (
-                        chat_id BIGINT PRIMARY KEY,
-                        username TEXT,
-                        timezone TEXT DEFAULT %s,
-                        subscribed BOOLEAN DEFAULT FALSE,
-                        last_menu_message_id BIGINT,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                ''', (DEFAULT_TIMEZONE,))
-                cur.execute('''
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT,
-                        task_date DATE,
-                        completed BOOLEAN DEFAULT FALSE,
-                        FOREIGN KEY (chat_id) REFERENCES users (chat_id) ON DELETE CASCADE
-                    )
-                ''')
-                cur.execute('CREATE INDEX IF NOT EXISTS idx_tasks_chat_id_date ON tasks (chat_id, task_date)')
-            conn.commit()
-        logging.info('Схема базы данных инициализирована с индексами.')
+        with conn.cursor() as cur:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    chat_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    timezone TEXT DEFAULT %s,
+                    subscribed BOOLEAN DEFAULT FALSE,
+                    last_menu_message_id BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            ''', (DEFAULT_TIMEZONE,))
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    task_date DATE,
+                    completed BOOLEAN DEFAULT FALSE,
+                    FOREIGN KEY (chat_id) REFERENCES users (chat_id) ON DELETE CASCADE
+                )
+            ''')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_tasks_chat_id_date ON tasks (chat_id, task_date)')
+        conn.commit()
+        logging.info('Схема базы данных инициализирована.')
     except Exception as e:
         logging.error(f'Ошибка инициализации базы данных: {e}')
         notify_admin_safe(f'⚠ Ошибка инициализации базы данных: {e}')
         raise
+    finally:
+        put_conn(conn)
 
-# Функции базы данных
 def get_user(chat_id):
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('SELECT chat_id, username, timezone, subscribed, last_menu_message_id FROM users WHERE chat_id = %s', (chat_id,))
-                user = cur.fetchone()
-        if user:
-            return {
-                'chat_id': user[0],
-                'username': user[1],
-                'timezone': user[2],
-                'subscribed': user[3],
-                'last_menu_message_id': user[4]
-            }
-        return None
+        with conn.cursor() as cur:
+            cur.execute('SELECT chat_id, username, timezone, subscribed, last_menu_message_id FROM users WHERE chat_id = %s', (chat_id,))
+            user = cur.fetchone()
+        return {
+            'chat_id': user[0],
+            'username': user[1],
+            'timezone': user[2],
+            'subscribed': user[3],
+            'last_menu_message_id': user[4]
+        } if user else None
     except Exception as e:
         logging.error(f'Ошибка get_user для chat_id={chat_id}: {e}')
         return None
+    finally:
+        put_conn(conn)
 
 def update_user(chat_id, **kwargs):
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                if kwargs:
-                    fields = ', '.join(f'{k} = %s' for k in kwargs)
-                    values = list(kwargs.values()) + [chat_id]
-                    cur.execute(f'UPDATE users SET {fields} WHERE chat_id = %s', values)
-                # if no rows updated -> insert (idempotent insert)
-                if cur.rowcount == 0:
-                    cur.execute('''
-                        INSERT INTO users (chat_id, username, timezone, subscribed, last_menu_message_id)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (chat_id) DO UPDATE SET
-                          username = EXCLUDED.username,
-                          timezone = EXCLUDED.timezone,
-                          subscribed = EXCLUDED.subscribed,
-                          last_menu_message_id = EXCLUDED.last_menu_message_id
-                    ''', (
-                        chat_id,
-                        kwargs.get('username'),
-                        kwargs.get('timezone', DEFAULT_TIMEZONE),
-                        kwargs.get('subscribed', False),
-                        kwargs.get('last_menu_message_id')
-                    ))
-            conn.commit()
+        with conn.cursor() as cur:
+            if kwargs:
+                fields = ', '.join(f'{k} = %s' for k in kwargs)
+                values = list(kwargs.values()) + [chat_id]
+                cur.execute(f'UPDATE users SET {fields} WHERE chat_id = %s', values)
+
+            if cur.rowcount == 0:
+                cur.execute('''
+                    INSERT INTO users (chat_id, username, timezone, subscribed, last_menu_message_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (chat_id) DO UPDATE SET
+                      username = EXCLUDED.username,
+                      timezone = EXCLUDED.timezone,
+                      subscribed = EXCLUDED.subscribed,
+                      last_menu_message_id = EXCLUDED.last_menu_message_id
+                ''', (
+                    chat_id,
+                    kwargs.get('username'),
+                    kwargs.get('timezone', DEFAULT_TIMEZONE),
+                    kwargs.get('subscribed', False),
+                    kwargs.get('last_menu_message_id')
+                ))
+        conn.commit()
         logging.info(f'Пользователь chat_id={chat_id} обновлён/создан')
     except Exception as e:
         logging.error(f'Ошибка update_user для chat_id={chat_id}: {e}')
+    finally:
+        put_conn(conn)
 
 def add_task(chat_id, task_date, completed=False):
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('INSERT INTO tasks (chat_id, task_date, completed) VALUES (%s, %s, %s)', (chat_id, task_date, completed))
-            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute('INSERT INTO tasks (chat_id, task_date, completed) VALUES (%s, %s, %s)', (chat_id, task_date, completed))
+        conn.commit()
         logging.info(f'Задача добавлена для chat_id={chat_id}, task_date={task_date}')
     except Exception as e:
         logging.error(f'Ошибка add_task для chat_id={chat_id}: {e}')
+    finally:
+        put_conn(conn)
 
 def get_tasks(chat_id, start_date, end_date):
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('SELECT task_date, completed FROM tasks WHERE chat_id = %s AND task_date BETWEEN %s AND %s ORDER BY task_date', (chat_id, start_date, end_date))
-                tasks = cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute('SELECT task_date, completed FROM tasks WHERE chat_id = %s AND task_date BETWEEN %s AND %s ORDER BY task_date', (chat_id, start_date, end_date))
+            tasks = cur.fetchall()
         return [{'task_date': t[0], 'completed': t[1]} for t in tasks]
     except Exception as e:
         logging.error(f'Ошибка get_tasks для chat_id={chat_id}: {e}')
         return []
+    finally:
+        put_conn(conn)
 
-# Мотивационные цитаты
+def cleanup_inactive_users():
+    conn = get_conn()
+    try:
+        cutoff = pendulum.now('UTC').subtract(months=1)
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM users WHERE created_at < %s AND subscribed = FALSE', (cutoff,))
+        conn.commit()
+        logging.info("Неактивные пользователи удалены")
+    except Exception as e:
+        logging.error(f"Ошибка cleanup_inactive_users: {e}")
+        notify_admin_safe(f"⚠ Ошибка очистки пользователей: {e}")
+    finally:
+        put_conn(conn)
+
+# --- Мотивационные цитаты ---
 MOTIVATIONAL_QUOTES = [
     "Каждый день — новый шанс стать лучше!",
     "Маленькие шаги приводят к большим целям!",
     "Ты сильнее, чем думаешь!",
 ]
 
-# Клавиатура
+# --- Клавиатура ---
 def get_inline_keyboard(user):
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(
@@ -209,7 +246,7 @@ def get_inline_keyboard(user):
     keyboard.add(types.InlineKeyboardButton('🌍 Часовой пояс', callback_data='settimezone'))
     return keyboard
 
-# Безопасная отправка/обновление меню
+# --- Меню ---
 def send_menu(chat_id, user, text):
     logging.info(f"Sending menu to chat_id={chat_id}, text={text[:50]}...")
     try:
@@ -218,7 +255,6 @@ def send_menu(chat_id, user, text):
         username = f"@{fresh_user.get('username')}" if fresh_user.get('username') else "друг"
         motivation = random.choice(MOTIVATIONAL_QUOTES)
 
-        # Экранируем текст для MarkdownV2
         formatted_text = f"*{escape_markdown(text, version=2)}*\n\n_{escape_markdown(motivation, version=2)}_"
 
         if prev_id:
@@ -245,8 +281,6 @@ def send_menu(chat_id, user, text):
         if msg:
             update_user(chat_id, last_menu_message_id=msg.message_id)
             logging.info(f"Menu sent for chat_id={chat_id}, message_id={msg.message_id}")
-        else:
-            logging.error(f"Failed to send menu to chat_id={chat_id}: No message returned")
     except Exception as e:
         logging.error(f"Error in send_menu for chat_id={chat_id}: {e}")
         try:
@@ -254,7 +288,7 @@ def send_menu(chat_id, user, text):
         except Exception:
             notify_admin_safe(f"⚠ Ошибка send_menu для {chat_id}: {e}")
 
-# Обработчики команд и callback'ов
+# --- Команды и callbacks ---
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
@@ -267,7 +301,6 @@ def start(message):
 @bot.message_handler(commands=['stats'])
 def stats(message):
     chat_id = message.chat.id
-    logging.info(f"Processing /stats for chat_id={chat_id}")
     user = get_user(chat_id)
     if not user:
         send_message_with_rate_limit(chat_id, escape_markdown("⚠ Сначала начни с /start", version=2), parse_mode="MarkdownV2")
@@ -288,15 +321,15 @@ def all_stats(message):
         logging.warning(f"Unauthorized /all_stats attempt by chat_id={chat_id}")
         return
     logging.info("Processing /all_stats")
+    conn = get_conn()
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('SELECT COUNT(*) FROM users WHERE subscribed = TRUE')
-                subscribed = cur.fetchone()[0]
-                cur.execute('SELECT COUNT(*) FROM tasks WHERE completed = TRUE')
-                completed = cur.fetchone()[0]
-                cur.execute('SELECT COUNT(*) FROM tasks')
-                total = cur.fetchone()[0]
+        with conn.cursor() as cur:
+            cur.execute('SELECT COUNT(*) FROM users WHERE subscribed = TRUE')
+            subscribed = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM tasks WHERE completed = TRUE')
+            completed = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM tasks')
+            total = cur.fetchone()[0]
         percentage = (completed / total * 100) if total > 0 else 0
         text = f"📊 Общая статистика:\n👥 Подписчиков: {subscribed}\n✅ Выполнено задач: {completed}/{total} ({percentage:.1f}%)"
         send_message_with_rate_limit(chat_id, escape_markdown(text, version=2), parse_mode="MarkdownV2")
@@ -304,79 +337,10 @@ def all_stats(message):
         logging.error(f"Ошибка all_stats: {e}")
         notify_admin_safe(f"⚠ Ошибка all_stats: {e}")
         send_message_with_rate_limit(chat_id, escape_markdown(f"⚠ Ошибка: {e}", version=2), parse_mode="MarkdownV2")
+    finally:
+        put_conn(conn)
 
-@bot.message_handler(commands=['settimezone'])
-def set_timezone(message):
-    chat_id = message.chat.id
-    logging.info(f"Processing /settimezone for chat_id={chat_id}")
-    user = get_user(chat_id)
-    if not user:
-        send_message_with_rate_limit(chat_id, escape_markdown("⚠ Сначала начни с /start", version=2), parse_mode="MarkdownV2")
-        return
-    keyboard = types.InlineKeyboardMarkup()
-    timezones = ['Europe/Moscow', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'UTC']
-    for tz in timezones:
-        keyboard.add(types.InlineKeyboardButton(tz, callback_data=f'tz_{tz}'))
-    send_message_with_rate_limit(chat_id, escape_markdown("🌍 Выбери часовой пояс:", version=2), parse_mode="MarkdownV2", reply_markup=keyboard)
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    chat_id = call.message.chat.id
-    user = get_user(chat_id)
-    if not user:
-        send_message_with_rate_limit(chat_id, escape_markdown("⚠ Сначала начни с /start", version=2), parse_mode="MarkdownV2")
-        return
-    logging.info(f"Processing callback {call.data} for chat_id={chat_id}")
-    if call.data == 'today':
-        task_date = pendulum.now(user['timezone']).date()
-        add_task(chat_id, task_date, completed=True)
-        send_menu(chat_id, user, "✅ Отлично, ты сделал это сегодня!")
-    elif call.data == 'next':
-        send_menu(chat_id, user, "📅 Планируй следующий день!")
-    elif call.data == 'subscribe':
-        update_user(chat_id, subscribed=not user['subscribed'])
-        send_menu(chat_id, user, "🔔 Подписка обновлена!")
-    elif call.data == 'stats':
-        start_date = pendulum.now(user['timezone']).subtract(weeks=1).date()
-        end_date = pendulum.now(user['timezone']).date()
-        tasks = get_tasks(chat_id, start_date, end_date)
-        completed = sum(1 for t in tasks if t['completed'])
-        total = len(tasks)
-        percentage = (completed / total * 100) if total > 0 else 0
-        send_menu(chat_id, user, f"📊 Статистика за неделю:\n✅ Выполнено: {completed}/{total} ({percentage:.1f}%)")
-    elif call.data.startswith('tz_'):
-        timezone = call.data[3:]
-        update_user(chat_id, timezone=timezone)
-        send_menu(chat_id, user, f"🌍 Часовой пояс установлен: {timezone}")
-
-# Напоминания
-def send_scheduled_task_for_tz(timezone):
-    try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('SELECT chat_id FROM users WHERE subscribed = TRUE AND timezone = %s', (timezone,))
-                users = cur.fetchall()
-        now = pendulum.now(timezone)
-        for (chat_id,) in users:
-            logging.info(f"Sending reminder to chat_id={chat_id}, timezone={timezone}")
-            send_menu(chat_id, None, "🔔 Напоминание! Время работать над привычками!")
-    except Exception as e:
-        logging.error(f"Ошибка в send_scheduled_task_for_tz для {timezone}: {e}")
-        notify_admin_safe(f"⚠ Ошибка напоминаний для {timezone}: {e}")
-
-def cleanup_inactive_users():
-    try:
-        cutoff = pendulum.now('UTC').subtract(months=1)
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute('DELETE FROM users WHERE created_at < %s AND subscribed = FALSE', (cutoff,))
-            conn.commit()
-        logging.info("Неактивные пользователи удалены")
-    except Exception as e:
-        logging.error(f"Ошибка cleanup_inactive_users: {e}")
-        notify_admin_safe(f"⚠ Ошибка очистки пользователей: {e}")
-
-# Планировщик задач
+# --- Планировщик ---
 scheduler = BackgroundScheduler()
 try:
     hour, minute = map(int, REMINDER_HOUR.split(':'))
@@ -385,13 +349,26 @@ except Exception:
 scheduler.add_job(cleanup_inactive_users, 'cron', hour=0, minute=0, timezone='UTC')
 for tz in ['Europe/Moscow', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'UTC']:
     scheduler.add_job(
-        send_scheduled_task_for_tz,
-        CronTrigger(hour=hour, minute=minute, timezone=tz),
-        args=[tz]
+        lambda tz=tz: send_menu_for_tz(tz),
+        CronTrigger(hour=hour, minute=minute, timezone=tz)
     )
 scheduler.start()
 
-# Webhook endpoint
+def send_menu_for_tz(timezone):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT chat_id FROM users WHERE subscribed = TRUE AND timezone = %s', (timezone,))
+            users = cur.fetchall()
+        for (chat_id,) in users:
+            send_menu(chat_id, None, "🔔 Напоминание! Время работать над привычками!")
+    except Exception as e:
+        logging.error(f"Ошибка напоминаний для {timezone}: {e}")
+        notify_admin_safe(f"⚠ Ошибка напоминаний для {timezone}: {e}")
+    finally:
+        put_conn(conn)
+
+# --- Webhook ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -399,7 +376,6 @@ def webhook():
         if update:
             bot.process_new_updates([update])
             return '', 200
-        logging.warning("Получен пустой update")
         return '', 400
     except Exception as e:
         logging.error(f"Ошибка обработки webhook: {e}")
@@ -409,25 +385,17 @@ def webhook():
 def index():
     return 'Привет, я жив!'
 
-# Инициализация и запуск
+# --- Точка входа ---
 if __name__ == '__main__':
     init_db()
-    try:
-        # настроим вебхук только если есть адрес
+    if WEBHOOK_URL:
         try:
             bot.remove_webhook()
-        except Exception:
-            logging.info('Webhook removal skipped or failed (ok if not set).')
-        if WEBHOOK_URL:
-            try:
-                bot.set_webhook(url=WEBHOOK_URL)
-                logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
-            except Exception as e:
-                logging.error(f"Ошибка установки webhook: {e}")
-                notify_admin_safe(f"⚠ Ошибка установки webhook: {e}")
-                raise
-        else:
-            logging.info('WEBHOOK_URL не настроен — бот может работать в polling режиме локально (не рекомендовано для Render).')
-    except Exception as e:
-        logging.error(f"Startup webhook error: {e}")
+            bot.set_webhook(url=WEBHOOK_URL)
+            logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
+        except Exception as e:
+            logging.error(f"Ошибка установки webhook: {e}")
+            notify_admin_safe(f"⚠ Ошибка установки webhook: {e}")
+    else:
+        logging.info('WEBHOOK_URL не настроен — бот может работать в polling режиме (локально).')
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
