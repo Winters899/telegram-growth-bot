@@ -1,1 +1,1 @@
-web: gunicorn --workers 4 --bind 0.0.0.0:$PORT --log-level info bot:app
+web: gunicorn bot:app --timeout 120 --log-level info
