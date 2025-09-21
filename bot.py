@@ -1,354 +1,195 @@
 import os
 import logging
-import logging.handlers
-from collections import deque
-from time import monotonic, sleep
-import atexit
-import signal
+import random
+from time import sleep
 from flask import Flask, request
 from telebot import TeleBot, types
-from psycopg2.pool import SimpleConnectionPool
-from psycopg2.extras import RealDictCursor
+import psycopg2
 import pendulum
-import random
-from statistics import mean
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from threading import Lock
 
-# Настройка логирования с ротацией
-try:
-    log_handler = logging.handlers.RotatingFileHandler('bot.log', maxBytes=10*1024*1024, backupCount=5)
-except Exception as e:
-    logging.warning(f"Не удалось настроить ротацию логов: {e}")
-    log_handler = logging.StreamHandler()
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[log_handler, logging.StreamHandler()]
+    format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# Проверка переменных окружения
-try:
-    TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN или TELEGRAM_TOKEN должны быть установлены.")
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL должен быть установлен.")
-    HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if not HOSTNAME:
-        raise RuntimeError("RENDER_EXTERNAL_HOSTNAME должен быть установлен.")
-    ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
-    if not ADMIN_ID:
-        raise RuntimeError("TELEGRAM_ADMIN_ID должен быть установлен.")
-except RuntimeError as e:
-    logging.critical(f"Ошибка запуска: {e}")
+# Инициализация переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
+RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '0'))
+DEFAULT_TIMEZONE = os.getenv('BOT_TIMEZONE', 'UTC')
+REMINDER_HOUR = os.getenv('REMINDER_HOUR', '09:00')
+
+WEBHOOK_URL = f'https://{RENDER_EXTERNAL_HOSTNAME}/webhook'
+if not BOT_TOKEN or not DATABASE_URL or not RENDER_EXTERNAL_HOSTNAME:
+    logging.error('Ошибка запуска: BOT_TOKEN, DATABASE_URL или RENDER_EXTERNAL_HOSTNAME должны быть установлены')
     exit(1)
 
-# Инициализация бота и вебхука
-bot = TeleBot(TOKEN)
-WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
+# Инициализация бота и Flask
+bot = TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Пул подключений к базе данных
-DATABASE_POOL = SimpleConnectionPool(1, 20, dsn=DATABASE_URL)
-
-# Ограничитель скорости для Telegram API
+# Инициализация RateLimiter
 class RateLimiter:
-    def __init__(self, max_calls, period):
+    def __init__(self, max_calls=60, period=60):
         self.max_calls = max_calls
         self.period = period
-        self.calls = deque()
+        self.calls = []
+        self.lock = Lock()
 
     def __enter__(self):
-        while len(self.calls) >= self.max_calls:
-            if monotonic() - self.calls[0] > self.period:
-                self.calls.popleft()
-            else:
-                logging.warning("Rate limit exceeded, waiting...")
-                sleep(self.period - (monotonic() - self.calls[0]))
-        self.calls.append(monotonic())
+        with self.lock:
+            now = pendulum.now().timestamp()
+            self.calls = [t for t in self.calls if now - t < self.period]
+            if len(self.calls) >= self.max_calls:
+                sleep(self.period - (now - self.calls[0]))
+            self.calls.append(now)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 
-rate_limiter = RateLimiter(max_calls=50, period=60)
-
-# Настройка времени по умолчанию
-DEFAULT_TIMEZONE = os.getenv("BOT_TIMEZONE", "UTC")
-REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
-
-# Кэш для предотвращения спама кнопками
-last_callback_time = {}
-
-# Кэш для отслеживания задержек callback
-callback_delays = deque(maxlen=100)
-
-# Мотивационные цитаты
-MOTIVATIONAL_QUOTES = [
-    "Каждый шаг приближает тебя к цели! 🚀",
-    "Ты делаешь это! Продолжай сиять! 🌟",
-    "Маленькие действия приводят к большим результатам! 💪",
-    "Твоя дисциплина — твоя суперсила! 🦸"
-]
-
-# Список популярных часовых поясов
-TIMEZONES = [
-    "Europe/Moscow",
-    "Europe/London",
-    "America/New_York",
-    "America/Los_Angeles",
-    "Asia/Tokyo",
-    "Australia/Sydney",
-    "UTC"
-]
-
-# Список заданий
-TASKS = [
-    "День 1: Определи 10 ключевых целей на ближайший год.",
-    "День 2: Составь утренний ритуал (вода, зарядка, визуализация).",
-    "День 3: Откажись от одной вредной привычки.",
-    "День 4: Веди дневник мыслей и благодарностей.",
-    "День 5: Составь список из 10 сильных сторон.",
-    "День 6: Сделай цифровой детокс на 6 часов.",
-    "День 7: Подведи итоги недели, отметь победы.",
-    "День 8: Применяй правило Парето 20/80.",
-    "День 9: Определи 3 главные приоритеты дня.",
-    "День 10: Используй технику Pomodoro (25/5).",
-    "День 11: Наведи порядок на рабочем месте.",
-    "День 12: Минимизируй отвлекающие факторы.",
-    "День 13: Сделай 2 часа глубокой работы.",
-    "День 14: Итоги недели: оцени продуктивность.",
-    "День 15: Напиши свою миссию и ценности.",
-    "День 16: Практикуй публичные мини-выступления.",
-    "День 17: Научись говорить «нет».",
-    "День 18: Прочитай биографию лидера.",
-    "День 19: Сделай доброе дело.",
-    "День 20: Визуализируй себя через 5 лет.",
-    "День 21: Итоги недели: оцени уверенность.",
-    "День 22: Составь план учёбы на 1 год.",
-    "День 23: Определи наставника.",
-    "День 24: Практикуй вечерний анализ.",
-    "День 25: Составь финансовую стратегию.",
-    "День 26: Сделай ревизию окружения.",
-    "День 27: Поделись знаниями.",
-    "День 28: Итоги: составь план на месяц.",
-    "День 29: Определи 3 долгосрочные мечты.",
-    "День 30: Создай карту жизни."
-]
-
-# Достижения
-ACHIEVEMENTS = {
-    5: "🏅 Молодец! 5 дней подряд!",
-    10: "🥈 Ты машина! 10 дней без перерыва!",
-    20: "🥇 Железная сила воли! 20 дней подряд!",
-    30: "👑 Герой челленджа! 30 дней!"
-}
-
-# Управление подключениями к базе данных
-def get_db():
-    return DATABASE_POOL.getconn()
-
-def release_db(conn):
-    DATABASE_POOL.putconn(conn)
+rate_limiter = RateLimiter(max_calls=60, period=60)  # 60 сообщений в минуту
 
 # Инициализация базы данных
 def init_db():
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     chat_id BIGINT PRIMARY KEY,
-                    day INTEGER DEFAULT 1,
-                    streak INTEGER DEFAULT 0,
-                    last_done DATE,
-                    achievements TEXT[] DEFAULT '{}',
-                    subscribed BOOLEAN DEFAULT FALSE,
                     username TEXT,
-                    last_menu_message_id INTEGER,
-                    timezone TEXT DEFAULT %s
-                );
-                """, (DEFAULT_TIMEZONE,))
-            cur.execute("""
+                    timezone TEXT DEFAULT %s,
+                    subscribed BOOLEAN DEFAULT FALSE,
+                    last_menu_message_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''', (DEFAULT_TIMEZONE,))
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
-                    day INTEGER PRIMARY KEY,
-                    description TEXT NOT NULL
-                );
-                """)
-            cur.execute("SELECT COUNT(*) FROM tasks")
-            if cur.fetchone()['count'] == 0:
-                for i, task in enumerate(TASKS, 1):
-                    cur.execute("INSERT INTO tasks (day, description) VALUES (%s, %s)", (i, task))
-            cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='timezone') THEN ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT %s; END IF; END $$;", (DEFAULT_TIMEZONE,))
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_chat_id ON users (chat_id);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_timezone ON users (timezone);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_subscribed ON users (subscribed);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_day ON tasks (day);")
-            conn.commit()
-        release_db(conn)
-    logging.info("Схема базы данных инициализирована с индексами.")
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    task_date DATE,
+                    completed BOOLEAN DEFAULT FALSE,
+                    FOREIGN KEY (chat_id) REFERENCES users (chat_id)
+                )
+            ''')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_tasks_chat_id_date ON tasks (chat_id, task_date)')
+        conn.commit()
+        logging.info('Схема базы данных инициализирована с индексами.')
+        conn.close()
+    except Exception as e:
+        logging.error(f'Ошибка инициализации базы данных: {e}')
+        send_message_with_rate_limit(ADMIN_ID, f'⚠ Ошибка инициализации базы данных: {e}')
+        exit(1)
 
-init_db()
-
-# Работа с пользователями
-def init_user(chat_id, username=None):
-    safe_username = escape(username) if username else None
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
-            user = cur.fetchone()
-            if not user:
-                cur.execute("INSERT INTO users (chat_id, username, day, timezone) VALUES (%s, %s, %s, %s)", (chat_id, safe_username, 1, DEFAULT_TIMEZONE))
-                conn.commit()
-        release_db(conn)
-
+# Функции базы данных
 def get_user(chat_id):
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('SELECT chat_id, username, timezone, subscribed, last_menu_message_id FROM users WHERE chat_id = %s', (chat_id,))
             user = cur.fetchone()
-        release_db(conn)
-    return user
+        conn.close()
+        if user:
+            return {
+                'chat_id': user[0],
+                'username': user[1],
+                'timezone': user[2],
+                'subscribed': user[3],
+                'last_menu_message_id': user[4]
+            }
+        return None
+    except Exception as e:
+        logging.error(f'Ошибка get_user для chat_id={chat_id}: {e}')
+        return None
 
 def update_user(chat_id, **kwargs):
-    if not kwargs:
-        return
-    allowed_fields = {
-        "day", "streak", "last_done", "achievements",
-        "subscribed", "username", "last_menu_message_id", "timezone"
-    }
-    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}
-    if not safe_kwargs:
-        logging.warning(f"update_user: нет допустимых полей для обновления {chat_id}: {list(kwargs.keys())}")
-        return
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            try:
-                fields = ", ".join([f"{k} = %s" for k in safe_kwargs.keys()])
-                values = list(safe_kwargs.values())
-                values.append(chat_id)
-                cur.execute(f"UPDATE users SET {fields} WHERE chat_id = %s", tuple(values))
-                conn.commit()
-            except Exception as e:
-                logging.error(f"Ошибка update_user для {chat_id}: {e}")
-                send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка update_user для {chat_id}: {e}")
-        release_db(conn)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            fields = ', '.join(f'{k} = %s' for k in kwargs)
+            values = list(kwargs.values()) + [chat_id]
+            cur.execute(f'UPDATE users SET {fields} WHERE chat_id = %s', values)
+            if cur.rowcount == 0:
+                cur.execute(
+                    'INSERT INTO users (chat_id, username, timezone, subscribed, last_menu_message_id) VALUES (%s, %s, %s, %s, %s)',
+                    (chat_id, kwargs.get('username'), kwargs.get('timezone', DEFAULT_TIMEZONE), kwargs.get('subscribed', False), kwargs.get('last_menu_message_id'))
+                )
+        conn.commit()
+        conn.close()
+        logging.info(f'Пользователь chat_id={chat_id} обновлён/создан')
+    except Exception as e:
+        logging.error(f'Ошибка update_user для chat_id={chat_id}: {e}')
 
-# Получение задания
-def get_task(user):
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            day = user.get('day') or 1
-            cur.execute("SELECT description FROM tasks WHERE day = %s", (day,))
-            task = cur.fetchone()
-            return task['description'] if task else "Задание не найдено"
-        release_db(conn)
+def add_task(chat_id, task_date, completed=False):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('INSERT INTO tasks (chat_id, task_date, completed) VALUES (%s, %s, %s)', (chat_id, task_date, completed))
+        conn.commit()
+        conn.close()
+        logging.info(f'Задача добавлена для chat_id={chat_id}, task_date={task_date}')
+    except Exception as e:
+        logging.error(f'Ошибка add_task для chat_id={chat_id}: {e}')
 
-# Проверка достижений
-def check_achievements(user):
-    unlocked = []
-    current_streak = user.get('streak') or 0
-    existing = user.get('achievements') or []
-    for threshold, text in ACHIEVEMENTS.items():
-        str_threshold = str(threshold)
-        if current_streak >= threshold and str_threshold not in existing:
-            new_achievements = existing + [str_threshold]
-            update_user(user['chat_id'], achievements=new_achievements)
-            unlocked.append(text)
-            existing = new_achievements
-    return unlocked
+def get_tasks(chat_id, start_date, end_date):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('SELECT task_date, completed FROM tasks WHERE chat_id = %s AND task_date BETWEEN %s AND %s ORDER BY task_date', (chat_id, start_date, end_date))
+            tasks = cur.fetchall()
+        conn.close()
+        return [{'task_date': t[0], 'completed': t[1]} for t in tasks]
+    except Exception as e:
+        logging.error(f'Ошибка get_tasks для chat_id={chat_id}: {e}')
+        return []
 
-# Переход к следующему заданию
-def next_task(user):
-    today = pendulum.today(user.get('timezone', DEFAULT_TIMEZONE)).date()
-    last_done = user.get('last_done')
-    streak = user.get('streak') or 0
-    if last_done:
-        if today == last_done + pendulum.duration(days=1):
-            streak += 1
-        elif today == last_done:
-            pass
-        else:
-            streak = 1
-    else:
-        streak = 1
-    current_day = user.get('day') or 1
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT COUNT(*) FROM tasks")
-            max_days = cur.fetchone()['count']
-        release_db(conn)
-    new_day = current_day + 1 if current_day < max_days else current_day
-    update_user(user['chat_id'], day=new_day, streak=streak, last_done=today)
-    user = get_user(user['chat_id'])
-    return get_task(user), check_achievements(user), user
+# Мотивационные цитаты
+MOTIVATIONAL_QUOTES = [
+    "Каждый день — новый шанс стать лучше!",
+    "Маленькие шаги приводят к большим целям!",
+    "Ты сильнее, чем думаешь!",
+]
 
-# Очистка неактивных пользователей
-def cleanup_inactive_users():
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            threshold = pendulum.now().subtract(days=90).date()
-            cur.execute("DELETE FROM users WHERE last_done < %s", (threshold,))
-            deleted = cur.rowcount
-            conn.commit()
-        release_db(conn)
-    logging.info(f"Удалено {deleted} неактивных пользователей")
-    if deleted > 0:
-        send_message_with_rate_limit(ADMIN_ID, f"🧹 Удалено {deleted} неактивных пользователей")
-
-# Инлайн-клавиатура
-def get_inline_keyboard(user):
-    keyboard = types.InlineKeyboardMarkup()
-    current_day = user.get('day') or 1
-    last_done = user.get('last_done')
-    today = pendulum.today(user.get('timezone', DEFAULT_TIMEZONE)).date()
-    total_days = 30
-    progress = int((current_day / total_days) * 10)
-    progress_bar = "[" + "█" * progress + " " * (10 - progress) + f"] {current_day}/{total_days}"
-    can_mark_done = not last_done or last_done != today
-    buttons = [
-        types.InlineKeyboardButton("📅 Сегодня", callback_data="today")
-    ]
-    if can_mark_done:
-        buttons.append(types.InlineKeyboardButton("✅ Выполнено", callback_data="next"))
-    keyboard.row(*buttons)
-    keyboard.add(types.InlineKeyboardButton(f"📊 Статистика {progress_bar}", callback_data="stats"))
-    keyboard.add(types.InlineKeyboardButton("ℹ Помощь", callback_data="help"))
-    keyboard.add(
-        types.InlineKeyboardButton(
-            "🔔 Подписаться" if not user.get('subscribed', False) else "❌ Отписаться",
-            callback_data="subscribe" if not user.get('subscribed', False) else "unsubscribe"
-        )
-    )
-    keyboard.add(types.InlineKeyboardButton("🌐 Часовой пояс", callback_data="set_timezone"))
-    return keyboard
-
-# Клавиатура для выбора часового пояса
-def get_timezone_keyboard():
-    keyboard = types.InlineKeyboardMarkup()
-    for tz in TIMEZONES:
-        keyboard.add(types.InlineKeyboardButton(tz, callback_data=f"tz_{tz}"))
-    keyboard.add(types.InlineKeyboardButton("⬅ Назад", callback_data="back_to_menu"))
-    return keyboard
-
-# Отправка сообщений с ограничением скорости
+# Отправка сообщений с учётом rate limiting
 def send_message_with_rate_limit(chat_id, text, **kwargs):
+    logging.info(f"Attempting to send message to chat_id={chat_id}, text={text[:50]}...")
     with rate_limiter:
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 msg = bot.send_message(chat_id, text, **kwargs)
-                logging.info(f"Message sent to chat_id={chat_id}")
+                logging.info(f"Message sent to chat_id={chat_id}, message_id={msg.message_id}")
                 return msg
             except Exception as e:
-                logging.warning(f"Повтор {attempt+1}/3: Ошибка отправки {chat_id}: {e}")
+                logging.warning(f"Attempt {attempt+1}/5: Failed to send message to chat_id={chat_id}: {e}")
                 sleep(2 ** attempt)
-        logging.error(f"Не удалось отправить сообщение {chat_id} после попыток")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка отправки сообщения для {chat_id}: {e}")
+        logging.error(f"Failed to send message to chat_id={chat_id} after 5 attempts")
+        if chat_id != ADMIN_ID:
+            send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка отправки сообщения для {chat_id}: {e}")
         return None
+
+# Создание клавиатуры
+def get_inline_keyboard(user):
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton('✅ Сегодня', callback_data='today'),
+        types.InlineKeyboardButton('📅 Следующий день', callback_data='next')
+    )
+    subscribe_text = '🔕 Отписаться' if user.get('subscribed', False) else '🔔 Подписаться'
+    keyboard.add(types.InlineKeyboardButton(subscribe_text, callback_data='subscribe'))
+    keyboard.add(types.InlineKeyboardButton('📊 Статистика', callback_data='stats'))
+    keyboard.add(types.InlineKeyboardButton('🌍 Часовой пояс', callback_data='settimezone'))
+    return keyboard
 
 # Отправка меню
 def send_menu(chat_id, user, text):
+    logging.info(f"Sending menu to chat_id={chat_id}, text={text[:50]}...")
     try:
         fresh_user = get_user(chat_id) or user or {'subscribed': False, 'timezone': DEFAULT_TIMEZONE}
         prev_id = fresh_user.get('last_menu_message_id')
@@ -364,10 +205,10 @@ def send_menu(chat_id, user, text):
                     parse_mode="Markdown",
                     reply_markup=get_inline_keyboard(fresh_user)
                 )
-                logging.info(f"Menu updated for chat_id={chat_id}")
+                logging.info(f"Menu updated for chat_id={chat_id}, message_id={prev_id}")
                 return
             except Exception as e:
-                logging.warning(f"Не удалось обновить меню {prev_id} для {chat_id}: {e}")
+                logging.warning(f"Failed to update menu message_id={prev_id} for chat_id={chat_id}: {e}")
                 update_user(chat_id, last_menu_message_id=None)
         msg = send_message_with_rate_limit(
             chat_id,
@@ -377,324 +218,176 @@ def send_menu(chat_id, user, text):
         )
         if msg:
             update_user(chat_id, last_menu_message_id=msg.message_id)
-            logging.info(f"Menu sent for chat_id={chat_id}")
+            logging.info(f"Menu sent for chat_id={chat_id}, message_id={msg.message_id}")
         else:
-            raise Exception("Не удалось отправить сообщение")
+            logging.error(f"Failed to send menu to chat_id={chat_id}: No message returned")
+            raise Exception("Failed to send menu")
     except Exception as e:
-        logging.error(f"Ошибка send_menu для {chat_id}: {e}")
+        logging.error(f"Error in send_menu for chat_id={chat_id}: {e}")
         send_message_with_rate_limit(chat_id, "⚠ Что-то пошло не так. Попробуй позже!")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка send_menu для {chat_id}: {e}")
+        if chat_id != ADMIN_ID:
+            send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка send_menu для {chat_id}: {e}")
 
-# Команда /start
+# Обработчики команд
 @bot.message_handler(commands=['start'])
 def start(message):
-    logging.info(f"Processing /start for chat_id={message.chat.id}")
-    try:
-        init_user(message.chat.id, message.from_user.username)
-        user = get_user(message.chat.id)
-        username = f"@{user.get('username')}" if user.get('username') else "друг"
-        send_menu(
-            message.chat.id,
-            user,
-            f"Привет, {username}! 👋 Я твой наставник на 30-дневном пути развития!\n\nНажимай кнопки ниже, чтобы начать челлендж."
-        )
-        logging.info(f"Menu sent for chat_id={message.chat.id}")
-    except Exception as e:
-        logging.error(f"Error in /start for chat_id={message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в /start для {message.chat.id}: {e}")
+    chat_id = message.chat.id
+    username = message.from_user.username
+    logging.info(f"Processing /start for chat_id={chat_id}, username=@{username}")
+    update_user(chat_id, username=username)
+    send_menu(chat_id, None, f"Привет, @{username}! 👋 Я твой наставник по привычкам.")
 
-# Команда /reset
-@bot.message_handler(commands=['reset'])
-def reset(message):
-    logging.info(f"Processing /reset for chat_id={message.chat.id}")
-    try:
-        init_user(message.chat.id, message.from_user.username)
-        update_user(message.chat.id, day=1, streak=0, last_done=None, achievements=[])
-        user = get_user(message.chat.id)
-        username = f"@{user.get('username')}" if user.get('username') else "друг"
-        send_menu(
-            message.chat.id,
-            user,
-            f"🔄 Челлендж сброшен, {username}! Начинаем с первого дня.\n\n📌 Сегодня: {get_task(user)}"
-        )
-        logging.info(f"Reset completed for chat_id={message.chat.id}")
-    except Exception as e:
-        logging.error(f"Error in /reset for chat_id={message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в /reset для {message.chat.id}: {e}")
-
-# Команда /settimezone
-@bot.message_handler(commands=['settimezone'])
-def set_timezone(message):
-    logging.info(f"Processing /settimezone for chat_id={message.chat.id}")
-    try:
-        user = get_user(message.chat.id)
-        username = f"@{user.get('username')}" if user.get('username') else "друг"
-        text = f"🌐 Выбери часовой пояс для напоминаний, {username} (текущий: {user.get('timezone', DEFAULT_TIMEZONE)}):"
-        send_message_with_rate_limit(message.chat.id, text, reply_markup=get_timezone_keyboard())
-        logging.info(f"Timezone selection sent for chat_id={message.chat.id}")
-    except Exception as e:
-        logging.error(f"Error in /settimezone for chat_id={message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в /settimezone для {message.chat.id}: {e}")
-
-# Команда /stats
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    logging.info(f"Processing /stats for chat_id={message.chat.id}")
-    try:
-        user = get_user(message.chat.id)
-        ach_list = []
-        for x in (user.get('achievements') or []):
-            try:
-                ach_list.append(ACHIEVEMENTS.get(int(x), ""))
-            except Exception:
-                pass
-        ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT COUNT(*) FROM tasks")
-                total_days = cur.fetchone()['count']
-            release_db(conn)
-        username = f"@{user.get('username')}" if user.get('username') else "друг"
-        send_menu(
-            message.chat.id,
-            user,
-            f"📊 Статистика, {username}:\n📅 День: *{user.get('day')}/{total_days}*\n🔥 Серия: *{user.get('streak') or 0} дней подряд*\n🌐 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*\n{ach_text}"
-        )
-        logging.info(f"Stats sent for chat_id={message.chat.id}")
-    except Exception as e:
-        logging.error(f"Error in /stats for chat_id={message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в /stats для {message.chat.id}: {e}")
+    chat_id = message.chat.id
+    logging.info(f"Processing /stats for chat_id={chat_id}")
+    user = get_user(chat_id)
+    if not user:
+        send_message_with_rate_limit(chat_id, "⚠ Сначала начни с /start")
+        return
+    start_date = pendulum.now(user['timezone']).subtract(weeks=1).date()
+    end_date = pendulum.now(user['timezone']).date()
+    tasks = get_tasks(chat_id, start_date, end_date)
+    completed = sum(1 for t in tasks if t['completed'])
+    total = len(tasks)
+    percentage = (completed / total * 100) if total > 0 else 0
+    send_message_with_rate_limit(chat_id, f"📊 Статистика за неделю:\n✅ Выполнено: {completed}/{total} ({percentage:.1f}%)")
 
-# Команда /all_stats
 @bot.message_handler(commands=['all_stats'])
 def all_stats(message):
-    logging.info(f"Processing /all_stats for chat_id={message.chat.id}")
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID:
+        logging.warning(f"Unauthorized /all_stats attempt by chat_id={chat_id}")
+        return
+    logging.info("Processing /all_stats")
     try:
-        if str(message.chat.id) != str(ADMIN_ID):
-            logging.warning(f"Несанкционированная попытка /all_stats от {message.chat.id}")
-            send_message_with_rate_limit(message.chat.id, "🚫 Команда доступна только администратору.")
-            return
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT chat_id, username, day, streak, timezone FROM users ORDER BY day DESC LIMIT 500;")
-                users = cur.fetchall()
-            release_db(conn)
-        if not users:
-            send_message_with_rate_limit(message.chat.id, "Нет пользователей.")
-            return
-        text = "👥 Статистика по пользователям (макс 500):\n"
-        for u in users:
-            uname = f"@{u['username']}" if u.get('username') else u['chat_id']
-            text += f"- {uname}: день {u.get('day')}, серия {u.get('streak')} дней, часовой пояс {u.get('timezone')}\n"
-        send_message_with_rate_limit(message.chat.id, text)
-        logging.info(f"All stats sent for chat_id={message.chat.id}")
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('SELECT COUNT(*) FROM users WHERE subscribed = TRUE')
+            subscribed = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM tasks WHERE completed = TRUE')
+            completed = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM tasks')
+            total = cur.fetchone()[0]
+        conn.close()
+        percentage = (completed / total * 100) if total > 0 else 0
+        send_message_with_rate_limit(chat_id, f"📊 Общая статистика:\n👥 Подписчиков: {subscribed}\n✅ Выполнено задач: {completed}/{total} ({percentage:.1f}%)")
     except Exception as e:
-        logging.error(f"Error in /all_stats for chat_id={message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в /all_stats для {message.chat.id}: {e}")
+        logging.error(f"Ошибка all_stats: {e}")
+        send_message_with_rate_limit(chat_id, f"⚠ Ошибка: {e}")
 
-# Обработка инлайн-кнопок
+@bot.message_handler(commands=['settimezone'])
+def set_timezone(message):
+    chat_id = message.chat.id
+    logging.info(f"Processing /settimezone for chat_id={chat_id}")
+    user = get_user(chat_id)
+    if not user:
+        send_message_with_rate_limit(chat_id, "⚠ Сначала начни с /start")
+        return
+    keyboard = types.InlineKeyboardMarkup()
+    timezones = ['Europe/Moscow', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'UTC']
+    for tz in timezones:
+        keyboard.add(types.InlineKeyboardButton(tz, callback_data=f'tz_{tz}'))
+    send_message_with_rate_limit(chat_id, "🌍 Выбери часовой пояс:", reply_markup=keyboard)
+
+# Обработчики callback'ов
 @bot.callback_query_handler(func=lambda call: True)
-def handle_inline_buttons(call):
-    logging.info(f"Processing callback {call.data} for chat_id={call.message.chat.id}")
-    try:
-        chat_id = call.message.chat.id
-        current_time = monotonic()
-        user_key = f"{chat_id}_{call.data}"
-        if user_key in last_callback_time and current_time - last_callback_time[user_key] < 2:
-            send_message_with_rate_limit(chat_id, "⏳ Пожалуйста, подожди немного перед повторным нажатием.")
-            bot.answer_callback_query(call.id, text="Слишком быстро! Подожди немного.")
-            return
-        last_callback_time[user_key] = current_time
-        init_user(chat_id, call.from_user.username)
-        user = get_user(chat_id)
-        data = call.data
-        username = f"@{user.get('username')}" if user.get('username') else "друг"
-        callback_time = pendulum.from_timestamp(call.message.date, tz='UTC')
-        request_time = pendulum.now('UTC')
-        time_diff = (request_time - callback_time).total_seconds()
-        callback_delays.append(time_diff)
-        adaptive_threshold = max(mean(callback_delays) + 5, 15) if callback_delays else 15
-        logging.info(f"Callback от {chat_id}: {data}, возраст {time_diff:.2f} сек, порог {adaptive_threshold:.2f} сек")
-        if time_diff >= adaptive_threshold:
-            logging.info(f"Пропущен устаревший callback от {chat_id}: {data}, возраст {time_diff} секунд")
-            bot.answer_callback_query(call.id, text="Запрос устарел, отправляю новое меню.")
-            send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
-            return
-        bot.answer_callback_query(call.id)
-        if data == "today":
-            send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
-            send_message_with_rate_limit(chat_id, "✅ Задание показано!")
-        elif data == "next":
-            task, achievements, user = next_task(user)
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT COUNT(*) FROM tasks")
-                    total_days = cur.fetchone()['count']
-                release_db(conn)
-            text = f"➡️ Следующее задание, {username}!\n{task}\n\n🔥 Серия: *{user.get('streak')} дней*\n📅 День *{user.get('day')}/{total_days}*"
-            send_menu(chat_id, user, text)
-            for ach in achievements:
-                send_message_with_rate_limit(
-                    chat_id,
-                    f"🎉 {ach}\n\n_{random.choice(MOTIVATIONAL_QUOTES)}_",
-                    parse_mode="Markdown"
-                )
-        elif data == "stats":
-            ach_list = []
-            for x in (user.get('achievements') or []):
-                try:
-                    ach_list.append(ACHIEVEMENTS.get(int(x), ""))
-                except Exception:
-                    pass
-            ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT COUNT(*) FROM tasks")
-                    total_days = cur.fetchone()['count']
-                release_db(conn)
-            send_menu(
-                chat_id,
-                user,
-                f"📊 Статистика, {username}:\n📅 День: *{user.get('day')}/{total_days}*\n🔥 Серия: *{user.get('streak') or 0} дней подряд*\n🌐 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*\n{ach_text}"
-            )
-        elif data == "subscribe":
-            update_user(chat_id, subscribed=True)
-            user = get_user(chat_id)
-            send_menu(
-                chat_id,
-                user,
-                f"✅ Напоминания включены, {username}! Буду писать в {REMINDER_HOUR} по твоему часовому поясу (*{user.get('timezone', DEFAULT_TIMEZONE)}*)."
-            )
-            update_scheduler()
-        elif data == "unsubscribe":
-            update_user(chat_id, subscribed=False)
-            user = get_user(chat_id)
-            send_menu(chat_id, user, f"❌ Ты отписался от напоминаний, {username}.")
-            update_scheduler()
-        elif data == "help":
-            send_menu(
-                chat_id,
-                user,
-                f"ℹ Помощь, {username}:\n"
-                "📅 — показать задание на сегодня\n"
-                "✅ — отметить выполнение\n"
-                "📊 — статистика\n"
-                "🔔 — подписка на напоминания\n"
-                "🌐 — настройка часового пояса\n"
-                "/reset — сбросить прогресс\n"
-                "/settimezone — выбрать часовой пояс\n\n"
-                "🎯 Выполняя задания подряд, ты будешь получать достижения!"
-            )
-        elif data == "set_timezone":
-            text = f"🌐 Выбери часовой пояс для напоминаний, {username} (текущий: {user.get('timezone', DEFAULT_TIMEZONE)}):"
-            send_message_with_rate_limit(chat_id, text, reply_markup=get_timezone_keyboard())
-        elif data.startswith("tz_"):
-            new_timezone = data[3:]
-            if new_timezone in TIMEZONES:
-                update_user(chat_id, timezone=new_timezone)
-                user = get_user(chat_id)
-                send_menu(
-                    chat_id,
-                    user,
-                    f"🌐 Часовой пояс установлен: *{new_timezone}*\n\nНапоминания будут приходить в {REMINDER_HOUR} по твоему времени."
-                )
-                update_scheduler()
-            else:
-                send_message_with_rate_limit(chat_id, "⚠ Неверный часовой пояс. Попробуй снова.")
-        elif data == "back_to_menu":
-            send_menu(chat_id, user, f"📌 Сегодня, {username}:\n{get_task(user)}\n\n🕒 Часовой пояс: *{user.get('timezone', DEFAULT_TIMEZONE)}*")
-        logging.info(f"Callback {data} processed for chat_id={chat_id}")
-    except Exception as e:
-        logging.error(f"Error in callback {call.data} for chat_id={call.message.chat.id}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в callback {call.data} для {call.message.chat.id}: {e}")
+def callback_query(call):
+    chat_id = call.message.chat.id
+    user = get_user(chat_id)
+    if not user:
+        send_message_with_rate_limit(chat_id, "⚠ Сначала начни с /start")
+        return
+    logging.info(f"Processing callback {call.data} for chat_id={chat_id}")
+    if call.data == 'today':
+        task_date = pendulum.now(user['timezone']).date()
+        add_task(chat_id, task_date, completed=True)
+        send_menu(chat_id, user, "✅ Отлично, ты сделал это сегодня!")
+    elif call.data == 'next':
+        send_menu(chat_id, user, "📅 Планируй следующий день!")
+    elif call.data == 'subscribe':
+        update_user(chat_id, subscribed=not user['subscribed'])
+        send_menu(chat_id, user, "🔔 Подписка обновлена!")
+    elif call.data == 'stats':
+        start_date = pendulum.now(user['timezone']).subtract(weeks=1).date()
+        end_date = pendulum.now(user['timezone']).date()
+        tasks = get_tasks(chat_id, start_date, end_date)
+        completed = sum(1 for t in tasks if t['completed'])
+        total = len(tasks)
+        percentage = (completed / total * 100) if total > 0 else 0
+        send_menu(chat_id, user, f"📊 Статистика за неделю:\n✅ Выполнено: {completed}/{total} ({percentage:.1f}%)")
+    elif call.data.startswith('tz_'):
+        timezone = call.data[3:]
+        update_user(chat_id, timezone=timezone)
+        send_menu(chat_id, user, f"🌍 Часовой пояс установлен: {timezone}")
 
-# Планировщик напоминаний
+# Напоминания
+def send_scheduled_task_for_tz(timezone):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('SELECT chat_id FROM users WHERE subscribed = TRUE AND timezone = %s', (timezone,))
+            users = cur.fetchall()
+        conn.close()
+        now = pendulum.now(timezone)
+        for (chat_id,) in users:
+            logging.info(f"Sending reminder to chat_id={chat_id}, timezone={timezone}")
+            send_menu(chat_id, None, f"🔔 Напоминание! Время работать над привычками!")
+    except Exception as e:
+        logging.error(f"Ошибка в send_scheduled_task_for_tz для {timezone}: {e}")
+        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка напоминаний для {timezone}: {e}")
+
+def cleanup_inactive_users():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM users WHERE created_at < %s AND subscribed = FALSE', (pendulum.now().subtract(months=1),))
+        conn.commit()
+        conn.close()
+        logging.info("Неактивные пользователи удалены")
+    except Exception as e:
+        logging.error(f"Ошибка cleanup_inactive_users: {e}")
+        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка очистки пользователей: {e}")
+
+# Планировщик задач
 scheduler = BackgroundScheduler()
+hour, minute = map(int, REMINDER_HOUR.split(':'))
+scheduler.add_job(cleanup_inactive_users, 'cron', hour=0, minute=0)
+for tz in ['Europe/Moscow', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'UTC']:
+    scheduler.add_job(
+        send_scheduled_task_for_tz,
+        CronTrigger(hour=hour, minute=minute, timezone=tz),
+        args=[tz]
+    )
+scheduler.start()
 
-def send_scheduled_task_for_tz(tz):
-    try:
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE subscribed = TRUE AND timezone = %s;", (tz,))
-                subs = cur.fetchall()
-            release_db(conn)
-        for user in subs:
-            now = pendulum.now(tz)
-            task = get_task(user)
-            username = f"@{user.get('username')}" if user.get('username') else "друг"
-            send_menu(
-                user['chat_id'],
-                user,
-                f"📌 Напоминание, {username} ({now.to_formatted_date_string()}):\n{task}\n\n_{random.choice(MOTIVATIONAL_QUOTES)}_"
-            )
-            logging.info(f"Reminder sent to chat_id={user['chat_id']} in timezone={tz}")
-    except Exception as e:
-        logging.error(f"Ошибка в напоминании для timezone={tz}: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в напоминании для timezone={tz}: {e}")
-
-def update_scheduler():
-    try:
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT DISTINCT timezone FROM users WHERE subscribed = TRUE;")
-                timezones = [row['timezone'] for row in cur.fetchall()]
-            release_db(conn)
-        scheduler.remove_all_jobs()
-        hour, minute = map(int, REMINDER_HOUR.split(':'))
-        for tz in timezones:
-            try:
-                scheduler.add_job(
-                    send_scheduled_task_for_tz,
-                    CronTrigger(hour=hour, minute=minute, timezone=tz),
-                    args=[tz]
-                )
-                logging.info(f"Scheduled reminders for timezone={tz}")
-            except Exception as e:
-                logging.error(f"Ошибка при добавлении задачи для {tz}: {e}")
-                send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка при добавлении задачи для {tz}: {e}")
-        scheduler.add_job(cleanup_inactive_users, 'interval', weeks=1)
-        logging.info(f"Обновлено расписание для {len(timezones)} часовых поясов")
-    except Exception as e:
-        logging.error(f"Ошибка в update_scheduler: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка в update_scheduler: {e}")
-
-# Webhook сервер
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        body = request.get_data(as_text=True)
-        update = telebot.types.Update.de_json(body)
-        if update.message:
-            user = update.message.from_user
-            logging.info(f"📩 Сообщение от @{user.username or user.id}: {getattr(update.message, 'text', '')}")
-        elif update.callback_query:
-            user = update.callback_query.from_user
-            logging.info(f"🔘 Callback от @{user.username or user.id}: {update.callback_query.data}")
-        bot.process_new_updates([update])
-        return '', 200
-    except Exception as e:
-        logging.error(f"Ошибка обработки вебхука: {e}")
-        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка вебхука: {e}")
+        update = types.Update.de_json(request.get_json())
+        if update:
+            bot.process_new_updates([update])
+            return '', 200
+        logging.warning("Получен пустой update")
         return '', 400
+    except Exception as e:
+        logging.error(f"Ошибка обработки webhook: {e}")
+        return '', 500
 
 @app.route('/')
 def index():
-    return "Привет, я жив!", 200
+    return 'Привет, я жив!'
 
-# Graceful shutdown
-def shutdown():
-    scheduler.shutdown()
-    logging.info("Scheduler shutdown gracefully")
-
-atexit.register(shutdown)
-signal.signal(signal.SIGTERM, lambda signum, frame: shutdown())
-
+# Инициализация и запуск
 if __name__ == '__main__':
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
-    logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
-    update_scheduler()
-    scheduler.start()
-    # Gunicorn запускается отдельно на Render
-    # port = int(os.getenv("PORT", 10000))
-    # app.run(host='0.0.0.0', port=port)
+    init_db()
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL)
+        logging.info(f"🔗 Вебхук установлен: {WEBHOOK_URL}")
+    except Exception as e:
+        logging.error(f"Ошибка установки webhook: {e}")
+        send_message_with_rate_limit(ADMIN_ID, f"⚠ Ошибка установки webhook: {e}")
+        exit(1)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
