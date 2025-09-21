@@ -5,7 +5,8 @@ import time
 import pendulum
 from flask import Flask, request, jsonify
 from telebot import TeleBot
-from telebot.types import Update, escape_markdown
+from telebot.types import Update
+from telebot.util import escape_markdown  # Исправленный импорт
 from telebot.apihelper import ApiTelegramException
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
