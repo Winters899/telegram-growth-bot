@@ -319,3 +319,11 @@ if __name__ == '__main__':
     REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
     scheduler.add_job(send_scheduled_task, 'cron', hour=int(REMINDER_HOUR.split(':')[0]), minute=int(REMINDER_HOUR.split(':')[1]))
     scheduler.start()
+
+    # Бесконечный цикл для поддержания процесса
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        scheduler.shutdown()
+        logging.info("Scheduler and application shut down.")
