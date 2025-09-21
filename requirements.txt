@@ -1,6 +1,6 @@
 flask==2.0.3
 Werkzeug==2.0.3
-python-telegram-bot==13.7
+pyTelegramBotAPI
 psycopg2-binary==2.9.3
 pendulum
 gunicorn==20.1.0
