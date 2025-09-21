@@ -401,7 +401,7 @@ def send_scheduled_task():
         except Exception as e:
             logging.error(f"Error in scheduled task for {user['chat_id']}: {e}")
 
-# 🌍 Webhook сервер
+# 🌍 Webhook сервер (для совместимости, но не используется с gunicorn)
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -446,12 +446,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
-def start_web_server():
-    port = int(os.getenv("PORT", 10000))
-    with ReusableTCPServer(("", port), Handler) as httpd:
-        logging.info(f"✅ Webhook server running on port {port}")
-        httpd.serve_forever()
-
 # Регистрация вебхука для Flask
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -472,5 +466,5 @@ if __name__ == '__main__':
     schedule.every().day.at(REMINDER_HOUR).do(send_scheduled_task)
     threading.Thread(target=schedule_checker, daemon=True).start()
 
-    # Запуск Flask для локального тестирования (не используется на Render с gunicorn)
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
+    # Удаляем вызов app.run() для продакшена, так как gunicorn его заменит
+    # app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
