@@ -1,15 +1,10 @@
 import os
 import telebot
-import schedule
-import time
-import threading
+from apscheduler.schedulers.background import BackgroundScheduler
 import logging
-import http.server
-import socketserver
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from telebot import types
-from datetime import timedelta
 import pendulum
 from flask import Flask, request
 
@@ -82,94 +77,58 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set.")
 
 def get_db():
-    # Простейшее подключение; при повышенной нагрузке лучше заменить на пул
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    """
-    Создаём таблицу users, если её нет, и добавляем колонку last_menu_message_id, если её нет.
-    Безопасная миграция с проверкой существования схемы.
-    """
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        # Проверяем существование таблицы
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            chat_id BIGINT PRIMARY KEY,
-            day INTEGER DEFAULT 1,
-            streak INTEGER DEFAULT 0,
-            last_done DATE,
-            achievements TEXT[] DEFAULT '{}',
-            subscribed BOOLEAN DEFAULT FALSE,
-            username TEXT
-        );
-        """)
-        # Проверяем и добавляем колонку last_menu_message_id, если её нет
-        cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_menu_message_id') THEN ALTER TABLE users ADD COLUMN last_menu_message_id INTEGER; END IF; END $$;")
-        conn.commit()
-        logging.info("Database schema initialized or verified.")
-    except psycopg2.Error as e:
-        logging.error(f"Database initialization failed: {e}")
-        raise
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id BIGINT PRIMARY KEY,
+                day INTEGER DEFAULT 1,
+                streak INTEGER DEFAULT 0,
+                last_done DATE,
+                achievements TEXT[] DEFAULT '{}',
+                subscribed BOOLEAN DEFAULT FALSE,
+                username TEXT
+            );
+            """)
+            cur.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_menu_message_id') THEN ALTER TABLE users ADD COLUMN last_menu_message_id INTEGER; END IF; END $$;")
+            conn.commit()
+            logging.info("Database schema initialized or verified.")
 
 init_db()
 
 # 📌 Работа с пользователем
 def init_user(chat_id, username=None):
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
-        user = cur.fetchone()
-        if not user:
-            cur.execute("INSERT INTO users (chat_id, username, day) VALUES (%s, %s, %s)", (chat_id, username, 1))
-            conn.commit()
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+            if not cur.fetchone():
+                cur.execute("INSERT INTO users (chat_id, username, day) VALUES (%s, %s, %s)", (chat_id, username, 1))
+                conn.commit()
 
 def get_user(chat_id):
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
-        user = cur.fetchone()
-        return user
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+            return cur.fetchone()
 
 def update_user(chat_id, **kwargs):
     if not kwargs:
         return
-    # Белый список полей, которые можно обновлять
-    allowed_fields = {
-        "day", "streak", "last_done", "achievements",
-        "subscribed", "username", "last_menu_message_id"
-    }
-    # Фильтруем недопустимые ключи
+    allowed_fields = {"day", "streak", "last_done", "achievements", "subscribed", "username", "last_menu_message_id"}
     safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}
     if not safe_kwargs:
         logging.warning(f"update_user: no allowed fields to update for {chat_id}: {list(kwargs.keys())}")
         return
 
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        fields = ", ".join([f"{k} = %s" for k in safe_kwargs.keys()])
-        values = list(safe_kwargs.values())
-        values.append(chat_id)
-        cur.execute(f"UPDATE users SET {fields} WHERE chat_id = %s", tuple(values))
-        conn.commit()
-    except Exception as e:
-        logging.warning(f"update_user error for {chat_id}: {e}")
-    finally:
-        cur.close()
-        conn.close()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            fields = ", ".join(f"{k} = %s" for k in safe_kwargs.keys())
+            values = list(safe_kwargs.values()) + [chat_id]
+            cur.execute(f"UPDATE users SET {fields} WHERE chat_id = %s", tuple(values))
+            conn.commit()
 
 # 🔄 Получить задание
 def get_task(user):
@@ -195,10 +154,8 @@ def check_achievements(user):
 def next_task(user):
     today = pendulum.now('UTC').date()
     streak = user.get('streak') or 0
-    # Увеличиваем streak при каждом нажатии "Выполнено"
     streak += 1
     current_day = user.get('day') or 1
-    # Переход к следующему дню без ограничений
     new_day = current_day + 1
     update_user(user['chat_id'], day=new_day, streak=streak, last_done=today)
     user = get_user(user['chat_id'])
@@ -224,39 +181,19 @@ def get_inline_keyboard(user):
 # === send_menu (устраняет "липкие" клавиши)
 def send_menu(chat_id, user, text):
     try:
-        # Берём актуальную версию пользователя
         fresh_user = get_user(chat_id) or user or {'subscribed': False}
         prev_id = fresh_user.get('last_menu_message_id')
-
-        if prev_id is not None:
+        if prev_id and int(prev_id) > 0:
             try:
-                prev_int = int(prev_id)
-            except (ValueError, TypeError):
-                prev_int = None
-
-            if prev_int and prev_int > 0:
+                bot.edit_message_reply_markup(chat_id=chat_id, message_id=int(prev_id), reply_markup=None)
+            except Exception as e:
                 try:
-                    bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_int, reply_markup=None)
-                    logging.debug(f"Cleared reply_markup for message {prev_int} in chat {chat_id}")
-                except Exception as e_edit:
-                    logging.debug(f"edit_message_reply_markup failed for {prev_int} in {chat_id}: {e_edit}")
-                    try:
-                        bot.delete_message(chat_id, prev_int)
-                        logging.debug(f"Deleted previous menu {prev_int} for {chat_id}")
-                    except Exception as e_del:
-                        logging.debug(f"delete_message also failed for {prev_int} in {chat_id}: {e_del}")
-                    try:
-                        update_user(chat_id, last_menu_message_id=None)
-                    except Exception as e_upd:
-                        logging.warning(f"Failed to clear last_menu_message_id for {chat_id}: {e_upd}")
-            else:
-                logging.debug(f"send_menu: prev_id invalid for {chat_id}: {prev_id}")
-
+                    bot.delete_message(chat_id, int(prev_id))
+                    update_user(chat_id, last_menu_message_id=None)
+                except Exception:
+                    pass
         msg = bot.send_message(chat_id, text, reply_markup=get_inline_keyboard(fresh_user))
-        try:
-            update_user(chat_id, last_menu_message_id=msg.message_id)
-        except Exception as e:
-            logging.warning(f"Can't save last_menu_message_id for {chat_id}: {msg.message_id} ({e})")
+        update_user(chat_id, last_menu_message_id=msg.message_id)
     except Exception as e:
         logging.error(f"send_menu error for {chat_id}: {e}")
 
@@ -276,12 +213,7 @@ def start(message):
 @bot.message_handler(commands=['stats'])
 def stats(message):
     user = get_user(message.chat.id)
-    ach_list = []
-    for x in (user.get('achievements') or []):
-        try:
-            ach_list.append(ACHIEVEMENTS.get(int(x), ""))
-        except Exception:
-            pass
+    ach_list = [ACHIEVEMENTS.get(int(x), "") for x in (user.get('achievements') or []) if x.isdigit()]
     ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
     send_menu(
         message.chat.id,
@@ -295,24 +227,17 @@ def all_stats(message):
     if str(message.chat.id) != str(ADMIN_ID):
         bot.send_message(message.chat.id, "🚫 Команда доступна только администратору.")
         return
-
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT chat_id, username, day, streak FROM users ORDER BY day DESC LIMIT 500;")
-        users = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
-
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT chat_id, username, day, streak FROM users ORDER BY day DESC LIMIT 500;")
+            users = cur.fetchall()
     if not users:
         bot.send_message(message.chat.id, "Нет пользователей.")
         return
-
-    text = "👥 Статистика по пользователям (макс 500):\n"
-    for u in users:
-        uname = f"@{u['username']}" if u.get('username') else u['chat_id']
-        text += f"- {uname}: день {u.get('day')}, серия {u.get('streak')} дней\n"
+    text = "👥 Статистика по пользователям (макс 500):\n" + "\n".join(
+        f"- {f'@{u['username']}' if u.get('username') else u['chat_id']}: день {u.get('day')}, серия {u.get('streak')} дней"
+        for u in users
+    )
     bot.send_message(message.chat.id, text)
 
 # 🎛 Обработка кнопок
@@ -322,77 +247,44 @@ def handle_inline_buttons(call):
     init_user(chat_id, call.from_user.username)
     user = get_user(chat_id)
     data = call.data
-
     try:
         bot.answer_callback_query(call.id)
     except Exception as e:
         logging.warning(f"Callback error: {e}")
-
     if data == "today":
         send_menu(chat_id, user, f"📌 Сегодня: {get_task(user)}")
-
     elif data == "next":
         task, achievements, user = next_task(user)
         text = f"➡ Следующее задание:\n{task}\n\n🔥 Серия: {user.get('streak')} дней\n📅 День {user.get('day')}/{len(TASKS)}"
         send_menu(chat_id, user, text)
         for ach in achievements:
-            try:
-                bot.send_message(chat_id, f"🎉 {ach}")
-            except Exception as e:
-                logging.error(f"Failed to send achievement to {chat_id}: {e}")
-
+            bot.send_message(chat_id, f"🎉 {ach}")
     elif data == "stats":
-        ach_list = []
-        for x in (user.get('achievements') or []):
-            try:
-                ach_list.append(ACHIEVEMENTS.get(int(x), ""))
-            except Exception:
-                pass
+        ach_list = [ACHIEVEMENTS.get(int(x), "") for x in (user.get('achievements') or []) if x.isdigit()]
         ach_text = "🎯 Достижения:\n" + ("\n".join(ach_list) if ach_list else "пока нет")
-        send_menu(
-            chat_id,
-            user,
-            f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}"
-        )
-
+        send_menu(chat_id, user, f"📊 Статистика:\n📅 День: {user.get('day')}/{len(TASKS)}\n🔥 Серия: {user.get('streak') or 0} дней подряд\n{ach_text}")
     elif data == "subscribe":
         update_user(chat_id, subscribed=True)
         user = get_user(chat_id)
         send_menu(chat_id, user, "✅ Напоминания включены! Буду писать в установленное время.")
-
     elif data == "unsubscribe":
         update_user(chat_id, subscribed=False)
         user = get_user(chat_id)
         send_menu(chat_id, user, "❌ Ты отписался от напоминаний.")
-
     elif data == "help":
-        send_menu(
-            chat_id,
-            user,
-            "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
-            "📅 — показать задание на сегодня\n"
-            "✅ — отметить выполнение\n"
-            "📊 — статистика\n"
-            "🔔 — подписка на напоминания\n\n"
-            "🎯 Выполняя задания подряд, ты будешь получать достижения!"
-        )
+        send_menu(chat_id, user, "ℹ Я помогаю пройти 30-дневную программу совершенствования:\n"
+                                "📅 — показать задание на сегодня\n"
+                                "✅ — отметить выполнение\n"
+                                "📊 — статистика\n"
+                                "🔔 — подписка на напоминания\n\n"
+                                "🎯 Выполняя задания подряд, ты будешь получать достижения!")
 
 # ⏰ Планировщик (только подписчикам)
-def schedule_checker():
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-
 def send_scheduled_task():
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM users WHERE subscribed = TRUE;")
-        subs = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
-
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE subscribed = TRUE;")
+            subs = cur.fetchall()
     for user in subs:
         try:
             task = get_task(user)
@@ -400,51 +292,6 @@ def send_scheduled_task():
             bot.send_message(user['chat_id'], text)
         except Exception as e:
             logging.error(f"Error in scheduled task for {user['chat_id']}: {e}")
-
-# 🌍 Webhook сервер (для совместимости, но не используется с gunicorn)
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Hello, I am alive!")
-
-    def do_POST(self):
-        if self.path == "/webhook":
-            length = int(self.headers.get('content-length', 0))
-            body = self.rfile.read(length)
-            try:
-                update = telebot.types.Update.de_json(body.decode("utf-8"))
-            except Exception as e:
-                logging.error(f"Failed to parse update body: {e}")
-                self.send_response(400)
-                self.end_headers()
-                return
-
-            if update.message:
-                user = update.message.from_user
-                logging.info(f"📩 Сообщение от @{user.username or user.id}: {getattr(update.message, 'text', '')}")
-            elif update.callback_query:
-                user = update.callback_query.from_user
-                logging.info(f"🔘 Callback от @{user.username or user.id}: {update.callback_query.data}")
-
-            try:
-                bot.process_new_updates([update])
-            except Exception as e:
-                logging.error(f"❌ Ошибка при обработке апдейта: {e}")
-
-            self.send_response(200)
-            self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-class ReusableTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
 
 # Регистрация вебхука для Flask
 @app.route('/webhook', methods=['POST'])
@@ -455,6 +302,11 @@ def webhook():
         return 'OK', 200
     return 'Not Found', 404
 
+# Health check для Render
+@app.route('/', methods=['GET'])
+def health_check():
+    return 'OK', 200
+
 # ▶️ Запуск
 if __name__ == '__main__':
     # Установка вебхука
@@ -462,9 +314,8 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"🔗 Webhook установлен: {WEBHOOK_URL}")
 
+    # Настройка планировщика
+    scheduler = BackgroundScheduler()
     REMINDER_HOUR = os.getenv("REMINDER_HOUR", "09:00")
-    schedule.every().day.at(REMINDER_HOUR).do(send_scheduled_task)
-    threading.Thread(target=schedule_checker, daemon=True).start()
-
-    # Удаляем вызов app.run() для продакшена, так как gunicorn его заменит
-    # app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
+    scheduler.add_job(send_scheduled_task, 'cron', hour=int(REMINDER_HOUR.split(':')[0]), minute=int(REMINDER_HOUR.split(':')[1]))
+    scheduler.start()
