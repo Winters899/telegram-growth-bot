@@ -17,9 +17,15 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 app = Flask(__name__)
-bot = telebot.TeleBot(os.getenv("BOT_TOKEN") or (logger.error("BOT_TOKEN отсутствует!") or exit(1)))
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") or (logger.error("RENDER_EXTERNAL_URL отсутствует!") or exit(1))
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 10000))
+
+if not (TOKEN and WEBHOOK_URL):
+    logger.error("BOT_TOKEN или RENDER_EXTERNAL_URL отсутствует!")
+    exit(1)
+
+bot = telebot.TeleBot(TOKEN)
 
 # Загрузка советов
 def load_advices(file_path="advices.txt"):
@@ -36,12 +42,12 @@ advices = load_advices()
 emojis = ["🌟", "✨", "🔥", "💡", "🌈"]
 
 # Очередь апдейтов
-update_queue = Queue(maxsize=100)  # Ограничение размера очереди
+update_queue = Queue(maxsize=100)
 
 def process_updates():
     while True:
         try:
-            update = update_queue.get(timeout=10)  # Таймаут для избежания зависания
+            update = update_queue.get(timeout=10)
             if update is None: break
             bot.process_new_updates([update])
             update_queue.task_done()
@@ -53,18 +59,18 @@ Thread(target=process_updates, daemon=True).start()
 # Хэндлеры бота
 @bot.message_handler(commands=["start"])
 def start(msg):
-    logger.info(f"Получена команда /start от {msg.from_user.id}")
+    logger.info(f"Команда /start от {msg.from_user.id}")
     bot.reply_to(msg, "Привет! Я бот-советчик 🧙‍♂️\nНапиши /advice для совета!")
 
 @bot.message_handler(commands=["advice"])
 def advice(msg):
-    logger.info(f"Получена команда /advice от {msg.from_user.id}")
+    logger.info(f"Команда /advice от {msg.from_user.id}")
     text = random.choice(emojis) if random.random() < 0.2 else f"{random.choice(advices)} {random.choice(emojis)}"
     bot.reply_to(msg, text)
 
 @bot.message_handler(content_types=["text"])
 def handle_text(msg):
-    logger.info(f"Получен текст от {msg.from_user.id}: {msg.text}")
+    logger.info(f"Текст от {msg.from_user.id}: {msg.text}")
     bot.reply_to(msg, "Понимаю только /start и /advice 😊")
 
 # Webhook
@@ -72,7 +78,7 @@ def handle_text(msg):
 def webhook():
     try:
         data = request.get_data().decode("utf-8")
-        logger.debug(f"Получен апдейт: {data}")
+        logger.debug(f"Получен апдейт: {data[:100]}...")  # Ограничение длины лога
         update = telebot.types.Update.de_json(data)
         if update:
             update_queue.put(update)
@@ -87,23 +93,19 @@ def webhook():
 def index():
     return "Бот работает!", 200
 
-# Установка вебхука с повторными попытками
-def set_webhook_with_retry(attempts=3, delay=5):
-    for attempt in range(attempts):
-        try:
-            bot.set_webhook(url=f"{WEBHOOK_URL}/webhook", drop_pending_updates=True)
-            logger.info(f"Вебхук установлен: {WEBHOOK_URL}/webhook")
-            return
-        except Exception as e:
-            logger.error(f"Попытка {attempt + 1}/{attempts} установки вебхука не удалась: {e}")
-            if attempt < attempts - 1:
-                import time
-                time.sleep(delay)
-    logger.error("Не удалось установить вебхук")
-    exit(1)
+# Установка вебхука
+def set_webhook():
+    try:
+        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook", drop_pending_updates=True)
+        logger.info(f"Вебхук установлен: {WEBHOOK_URL}/webhook")
+        # Проверка вебхука
+        webhook_info = bot.get_webhook_info()
+        logger.info(f"Webhook info: {webhook_info}")
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {e}")
+        exit(1)
 
-# Запуск
 if __name__ == "__main__":
-    set_webhook_with_retry()
+    set_webhook()
     logger.info(f"Сервер запущен на 0.0.0.0:{PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False)
