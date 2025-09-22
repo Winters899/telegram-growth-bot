@@ -5,7 +5,17 @@ from flask import Flask, request
 import logging
 from logging.handlers import RotatingFileHandler
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
+import signal
+import sys
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+import pyTelegramBotAPI
+import flask
 
 # Настройка логирования
 logging.basicConfig(
@@ -17,6 +27,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Логирование версий библиотек
+logger.debug(f"Версия pyTelegramBotAPI: {pyTelegramBotAPI.__version__}")
+logger.debug(f"Версия Flask: {flask.__version__}")
 
 # Проверка переменных окружения
 TOKEN = os.getenv("BOT_TOKEN")
@@ -50,7 +64,7 @@ try:
     if os.path.exists("advices.txt"):
         with open("advices.txt", encoding="utf-8") as f:
             advices = [line.strip() for line in f if line.strip()]
-            logger.info(f"Загружено {len(advices)} советов из advices.txt")
+            logger.info(f"Загружено {len(advices)} советов из advices.txt: {advices[:3]}...")
     else:
         advices = [
             "Пей больше воды",
@@ -64,28 +78,44 @@ try:
             "Медитируй и отдыхай от стресса",
             "Помогай другим — добро возвращается",
         ]
-        logger.info(f"Файл advices.txt не найден, используются стандартные советы ({len(advices)})")
+        logger.info(f"Файл advices.txt не найден, используются стандартные советы ({len(advices)}): {advices[:3]}...")
 except Exception as e:
     logger.error(f"Ошибка при загрузке advices.txt: {str(e)}")
     raise
 
 # Смайлы
 emojis = ["🌟", "✨", "🔥", "💡", "🌈", "💖", "🌞", "🍀", "⚡", "🌊"]
-logger.debug(f"Загружено {len(emojis)} эмодзи")
+logger.debug(f"Загружено {len(emojis)} эмодзи: {emojis}")
+
+# Обработчик сигналов завершения
+def signal_handler(sig, frame):
+    logger.info(f"Получен сигнал завершения: {signal.Signals(sig).name}")
+    logger.info("Завершение работы приложения")
+    bot.remove_webhook()
+    logger.info("Вебхук удален перед завершением")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # Хэндлеры
 @bot.message_handler(commands=["start"])
 def start(msg):
-    logger.info(f"Получена команда /start от {msg.from_user.id} (@{msg.from_user.username})")
+    start_time = time.time()
+    logger.info(f"Получена команда /start от user_id={msg.from_user.id} (@{msg.from_user.username}), "
+                f"chat_id={msg.chat.id}, message_id={msg.message_id}")
     try:
-        bot.reply_to(msg, "Привет! Я бот-советчик 🧙‍♂️\nНапиши /advice, и я дам совет!")
-        logger.debug(f"Ответ на /start отправлен пользователю {msg.from_user.id}")
+        response = bot.reply_to(msg, "Привет! Я бот-советчик 🧙‍♂️\nНапиши /advice, и я дам совет!")
+        logger.debug(f"Ответ на /start отправлен: message_id={response.message_id}, "
+                     f"время выполнения: {time.time() - start_time:.3f} сек")
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа на /start: {str(e)}")
 
 @bot.message_handler(commands=["advice"])
 def advice(msg):
-    logger.info(f"Получена команда /advice от {msg.from_user.id} (@{msg.from_user.username})")
+    start_time = time.time()
+    logger.info(f"Получена команда /advice от user_id={msg.from_user.id} (@{msg.from_user.username}), "
+                f"chat_id={msg.chat.id}, message_id={msg.message_id}")
     try:
         if random.randint(1, 5) == 1:  # шанс 1 из 5 — только смайл
             text = random.choice(emojis)
@@ -95,25 +125,30 @@ def advice(msg):
             emoji = random.choice(emojis)
             text = f"{advice_text} {emoji}"
             logger.debug(f"Выбран совет: {text}")
-        bot.reply_to(msg, text)
-        logger.debug(f"Ответ на /advice отправлен пользователю {msg.from_user.id}")
+        response = bot.reply_to(msg, text)
+        logger.debug(f"Ответ на /advice отправлен: message_id={response.message_id}, "
+                     f"время выполнения: {time.time() - start_time:.3f} сек")
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа на /advice: {str(e)}")
 
 # Обработчик для всех текстовых сообщений
 @bot.message_handler(content_types=["text"])
 def handle_text(msg):
-    logger.info(f"Получено текстовое сообщение от {msg.from_user.id} (@{msg.from_user.username}): {msg.text}")
+    start_time = time.time()
+    logger.info(f"Получено текстовое сообщение от user_id={msg.from_user.id} (@{msg.from_user.username}), "
+                f"chat_id={msg.chat.id}, message_id={msg.message_id}, текст: {msg.text}")
     try:
-        bot.reply_to(msg, "Я понимаю только команды /start и /advice 😊")
-        logger.debug(f"Ответ на текстовое сообщение отправлен пользователю {msg.from_user.id}")
+        response = bot.reply_to(msg, "Я понимаю только команды /start и /advice 😊")
+        logger.debug(f"Ответ на текстовое сообщение отправлен: message_id={response.message_id}, "
+                     f"время выполнения: {time.time() - start_time:.3f} сек")
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа на текстовое сообщение: {str(e)}")
 
 # Flask endpoint для Telegram
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logger.debug("Получен запрос на /webhook")
+    start_time = time.time()
+    logger.debug(f"Получен запрос на /webhook, headers: {dict(request.headers)}")
     try:
         json_str = request.get_data().decode("utf-8")
         logger.debug(f"Входящее обновление: {json_str}")
@@ -121,9 +156,11 @@ def webhook():
         if update is None:
             logger.error("Не удалось декодировать обновление")
             return "ok", 200
-        logger.info(f"Обновление успешно декодировано: update_id={update.update_id}")
+        logger.info(f"Обновление успешно декодировано: update_id={update.update_id}, "
+                    f"message={update.message.to_dict() if update.message else None}, "
+                    f"chat={update.message.chat.to_dict() if update.message and update.message.chat else None}")
         bot.process_new_updates([update])
-        logger.debug("Обновление обработано")
+        logger.debug(f"Обновление обработано, время выполнения: {time.time() - start_time:.3f} сек")
         return "ok", 200
     except Exception as e:
         logger.error(f"Ошибка при обработке вебхука: {str(e)}")
@@ -132,16 +169,18 @@ def webhook():
 # Healthcheck
 @app.route("/", methods=["GET"])
 def index():
-    logger.debug("Получен запрос на /")
+    logger.debug(f"Получен запрос на /, headers: {dict(request.headers)}")
     return "Бот работает!", 200
 
 # Тестовый эндпоинт для отладки
 @app.route("/test", methods=["POST"])
 def test():
-    logger.debug("Получен тестовый запрос на /test")
+    start_time = time.time()
+    logger.debug(f"Получен тестовый запрос на /test, headers: {dict(request.headers)}")
     try:
         data = request.get_data().decode("utf-8")
         logger.info(f"Тестовый запрос: {data}")
+        logger.debug(f"Тестовый запрос обработан, время выполнения: {time.time() - start_time:.3f} сек")
         return "Тест OK", 200
     except Exception as e:
         logger.error(f"Ошибка при обработке тестового запроса: {str(e)}")
@@ -149,6 +188,18 @@ def test():
 
 if __name__ == "__main__":
     logger.info("Запуск приложения")
+    # Логирование системных метрик
+    if PSUTIL_AVAILABLE:
+        process = psutil.Process()
+        logger.debug(f"Системные метрики: память={process.memory_info().rss / 1024 / 1024:.2f} МБ")
+
+    # Проверка состояния вебхука
+    try:
+        webhook_info = bot.get_webhook_info()
+        logger.info(f"Текущее состояние вебхука: {webhook_info.to_dict()}")
+    except Exception as e:
+        logger.error(f"Ошибка при получении webhook info: {str(e)}")
+
     # URL Render-а
     WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}/webhook"
     logger.debug(f"WEBHOOK_URL: {WEBHOOK_URL}")
@@ -177,4 +228,6 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=int(PORT))
     except Exception as e:
         logger.error(f"Ошибка при запуске Flask сервера: {str(e)}")
+        if PSUTIL_AVAILABLE:
+            logger.debug(f"Системные метрики перед завершением: память={process.memory_info().rss / 1024 / 1024:.2f} МБ")
         raise
