@@ -9,12 +9,16 @@ from datetime import datetime, timedelta
 import time
 import signal
 import sys
-import pkg_resources
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
+try:
+    import pkg_resources
+    PKG_RESOURCES_AVAILABLE = True
+except ImportError:
+    PKG_RESOURCES_AVAILABLE = False
 import flask
 
 # Настройка логирования
@@ -29,11 +33,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Логирование версий библиотек
-try:
-    telebot_version = pkg_resources.get_distribution("pyTelegramBotAPI").version
-except pkg_resources.DistributionNotFound:
-    telebot_version = "неизвестна (pyTelegramBotAPI не установлен)"
-logger.debug(f"Версия pyTelegramBotAPI: {telebot_version}")
+if PKG_RESOURCES_AVAILABLE:
+    try:
+        telebot_version = pkg_resources.get_distribution("pyTelegramBotAPI").version
+        logger.debug(f"Версия pyTelegramBotAPI: {telebot_version}")
+    except pkg_resources.DistributionNotFound:
+        logger.debug("Версия pyTelegramBotAPI: неизвестна (pyTelegramBotAPI не установлен)")
+else:
+    logger.debug("Версия pyTelegramBotAPI: неизвестна (pkg_resources не доступен)")
 logger.debug(f"Версия Flask: {flask.__version__}")
 
 # Проверка переменных окружения
