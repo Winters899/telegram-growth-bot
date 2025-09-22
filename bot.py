@@ -11,7 +11,7 @@ import telebot
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(), RotatingFileHandler('bot.log', maxBytes=1_000_000, backupCount=3)]
+    handlers=[logging.StreamHandler(), RotatingFileHandler('bot.log', maxBytes=1_000_000, backupCount=2)]
 )
 logger = logging.getLogger(__name__)
 
@@ -36,18 +36,18 @@ def load_advices(file_path="advices.txt"):
         return _default_advices()
 
 def _default_advices():
-    return ["Пей больше воды", "Выходи гулять", "Высыпайся", "Веди дневник благодарности", "Учись новому"]
+    return ["Пей больше воды", "Выходи гулять", "Высыпайся"]
 
 advices = load_advices()
-emojis = ["🌟", "✨", "🔥", "💡", "🌈"]
+emojis = ["🌟", "✨", "🔥"]
 
 # Очередь апдейтов
-update_queue = Queue(maxsize=100)
+update_queue = Queue(maxsize=50)
 
 def process_updates():
     while True:
         try:
-            update = update_queue.get(timeout=10)
+            update = update_queue.get(timeout=5)
             if update is None: break
             bot.process_new_updates([update])
             update_queue.task_done()
@@ -78,7 +78,7 @@ def handle_text(msg):
 def webhook():
     try:
         data = request.get_data().decode("utf-8")
-        logger.debug(f"Получен апдейт: {data[:100]}...")  # Ограничение длины лога
+        logger.debug(f"Получен апдейт: {data[:50]}...")
         update = telebot.types.Update.de_json(data)
         if update:
             update_queue.put(update)
@@ -96,11 +96,9 @@ def index():
 # Установка вебхука
 def set_webhook():
     try:
-        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook", drop_pending_updates=True)
-        logger.info(f"Вебхук установлен: {WEBHOOK_URL}/webhook")
-        # Проверка вебхука
+        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook", drop_pending_updates=True, timeout=10)
         webhook_info = bot.get_webhook_info()
-        logger.info(f"Webhook info: {webhook_info}")
+        logger.info(f"Webhook info: {webhook_info.url}, pending updates: {webhook_info.pending_update_count}")
     except Exception as e:
         logger.error(f"Ошибка установки вебхука: {e}")
         exit(1)
