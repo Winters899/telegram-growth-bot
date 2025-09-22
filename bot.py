@@ -7,8 +7,8 @@ import time
 import threading
 import logging
 from flask import Flask, request
-from psycopg2.pool import SimpleConnectionPool
-from psycopg2.extras import RealDictCursor
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
 from telebot import types
 from telebot.formatting import escape_markdown
 from telebot.types import Update
