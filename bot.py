@@ -17,7 +17,8 @@ app = Flask(__name__)
 # Загрузка фраз из файла
 # -------------------------
 with open("phrases.txt", "r", encoding="utf-8") as f:
-    phrases = [line.strip() for line in f if line.strip()]
+    content = f.read()
+phrases = [p.strip() for p in content.split('---') if p.strip()]
 
 # -------------------------
 # Хэндлер команды /start
