@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import time
 import signal
 import sys
+import pkg_resources
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -28,7 +29,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Логирование версий библиотек
-logger.debug(f"Версия pyTelegramBotAPI: {telebot.__version__}")
+try:
+    telebot_version = pkg_resources.get_distribution("pyTelegramBotAPI").version
+except pkg_resources.DistributionNotFound:
+    telebot_version = "неизвестна (pyTelegramBotAPI не установлен)"
+logger.debug(f"Версия pyTelegramBotAPI: {telebot_version}")
 logger.debug(f"Версия Flask: {flask.__version__}")
 
 # Проверка переменных окружения
@@ -234,5 +239,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Ошибка при запуске Flask сервера: {str(e)}")
         if PSUTIL_AVAILABLE:
+            process = psutil.Process()
             logger.debug(f"Системные метрики перед завершением: память={process.memory_info().rss / 1024 / 1024:.2f} МБ")
         raise
