@@ -14,7 +14,6 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-import pyTelegramBotAPI
 import flask
 
 # Настройка логирования
