@@ -292,3 +292,8 @@ except Exception as e:
     logger.exception("Fatal DB init error", extra={'error': str(e)})
     notify_admin_safe(f"⚠ Bot failed to start: {str(e)[:100]}")
     raise
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
