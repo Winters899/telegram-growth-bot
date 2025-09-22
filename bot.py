@@ -1,6 +1,7 @@
 import os
 import telebot
 from flask import Flask, request
+from telebot import types
 
 # -------------------------
 # Настройки
@@ -16,7 +17,12 @@ app = Flask(__name__)
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
-    bot.reply_to(message, "Привет! Я простой бот на Render 😎")
+    
+keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+start_button = types.KeyboardButton(text="🚀 Начать")
+keyboard.add(start_button)
+bot.send_message(message.chat.id, "Привет! Я простой бот на Render 😎", reply_markup=keyboard)
+
 
 # -------------------------
 # Route для webhook
