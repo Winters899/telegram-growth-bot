@@ -214,6 +214,9 @@ if __name__ == "__main__":
     try:
         webhook_info = bot.get_webhook_info()
         logger.info(f"Текущее состояние вебхука: {webhook_info.to_dict()}")
+        if webhook_info.url != f"{RENDER_EXTERNAL_URL}/webhook":
+            logger.warning(f"Вебхук не соответствует ожидаемому URL: текущий={webhook_info.url}, "
+                           f"ожидаемый={RENDER_EXTERNAL_URL}/webhook")
     except Exception as e:
         logger.error(f"Ошибка при получении webhook info: {str(e)}")
 
@@ -233,6 +236,9 @@ if __name__ == "__main__":
         result = bot.set_webhook(url=WEBHOOK_URL)
         if result:
             logger.info(f"Вебхук успешно установлен: {WEBHOOK_URL}")
+            # Дополнительная проверка после установки
+            webhook_info = bot.get_webhook_info()
+            logger.debug(f"Проверка после установки: {webhook_info.to_dict()}")
         else:
             logger.error("Не удалось установить вебхук")
     except Exception as e:
