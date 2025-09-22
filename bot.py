@@ -173,9 +173,28 @@ def webhook():
         if update is None:
             logger.error("Не удалось декодировать обновление")
             return "ok", 200
+        # Логирование основных атрибутов сообщения и чата
+        message_info = None
+        chat_info = None
+        if update.message:
+            message_info = {
+                "message_id": update.message.message_id,
+                "text": update.message.text,
+                "from": {
+                    "id": update.message.from_user.id,
+                    "username": update.message.from_user.username,
+                    "first_name": update.message.from_user.first_name
+                },
+                "date": update.message.date
+            }
+            if update.message.chat:
+                chat_info = {
+                    "id": update.message.chat.id,
+                    "type": update.message.chat.type,
+                    "title": update.message.chat.title if hasattr(update.message.chat, "title") else None
+                }
         logger.info(f"Обновление успешно декодировано: update_id={update.update_id}, "
-                    f"message={update.message.to_dict() if update.message else None}, "
-                    f"chat={update.message.chat.to_dict() if update.message and update.message.chat else None}")
+                    f"message={message_info}, chat={chat_info}")
         bot.process_new_updates([update])
         logger.debug(f"Обновление обработано, время выполнения: {time.time() - start_time:.3f} сек")
         return "ok", 200
@@ -214,9 +233,10 @@ if __name__ == "__main__":
     try:
         webhook_info = bot.get_webhook_info()
         logger.info(f"Текущее состояние вебхука: {webhook_info.to_dict()}")
-        if webhook_info.url != f"{RENDER_EXTERNAL_URL}/webhook":
+        expected_webhook = f"{RENDER_EXTERNAL_URL}/webhook"
+        if webhook_info.url != expected_webhook:
             logger.warning(f"Вебхук не соответствует ожидаемому URL: текущий={webhook_info.url}, "
-                           f"ожидаемый={RENDER_EXTERNAL_URL}/webhook")
+                           f"ожидаемый={expected_webhook}")
     except Exception as e:
         logger.error(f"Ошибка при получении webhook info: {str(e)}")
 
