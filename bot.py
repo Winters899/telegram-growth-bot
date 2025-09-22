@@ -26,8 +26,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.StreamHandler(),  # Вывод в консоль
-        RotatingFileHandler('bot.log', maxBytes=1000000, backupCount=5)  # Сохранение в файл
+        logging.StreamHandler(),
+        RotatingFileHandler('bot.log', maxBytes=1000000, backupCount=5)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def advice(msg):
     logger.info(f"Получена команда /advice от user_id={msg.from_user.id} (@{msg.from_user.username}), "
                 f"chat_id={msg.chat.id}, message_id={msg.message_id}")
     try:
-        if random.randint(1, 5) == 1:  # шанс 1 из 5 — только смайл
+        if random.randint(1, 5) == 1:
             text = random.choice(emojis)
             logger.debug(f"Выбран только эмодзи: {text}")
         else:
@@ -148,7 +148,6 @@ def advice(msg):
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа на /advice: {str(e)}")
 
-# Обработчик для всех текстовых сообщений
 @bot.message_handler(content_types=["text"])
 def handle_text(msg):
     start_time = time.time()
@@ -161,7 +160,6 @@ def handle_text(msg):
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа на текстовое сообщение: {str(e)}")
 
-# Flask endpoint для Telegram
 @app.route("/webhook", methods=["POST"])
 def webhook():
     start_time = time.time()
@@ -173,7 +171,6 @@ def webhook():
         if update is None:
             logger.error("Не удалось декодировать обновление")
             return "ok", 200
-        # Логирование основных атрибутов сообщения и чата
         message_info = None
         chat_info = None
         if update.message:
@@ -202,13 +199,11 @@ def webhook():
         logger.error(f"Ошибка при обработке вебхука: {str(e)}")
         return "ok", 200
 
-# Healthcheck
 @app.route("/", methods=["GET"])
 def index():
     logger.debug(f"Получен запрос на /, headers: {dict(request.headers)}")
     return "Бот работает!", 200
 
-# Тестовый эндпоинт для отладки
 @app.route("/test", methods=["POST"])
 def test():
     start_time = time.time()
@@ -222,14 +217,30 @@ def test():
         logger.error(f"Ошибка при обработке тестового запроса: {str(e)}")
         return "error", 500
 
+# Новый эндпоинт для проверки вебхука
+@app.route("/ping", methods=["GET"])
+def ping():
+    try:
+        webhook_info = bot.get_webhook_info()
+        data = webhook_info.to_dict()
+        logger.info(f"Проверка вебхука через /ping: {data}")
+        return flask.jsonify({
+            "status": "ok",
+            "webhook_info": data
+        }), 200
+    except Exception as e:
+        logger.error(f"Ошибка при получении webhook info через /ping: {str(e)}")
+        return flask.jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 if __name__ == "__main__":
     logger.info("Запуск приложения")
-    # Логирование системных метрик
     if PSUTIL_AVAILABLE:
         process = psutil.Process()
         logger.debug(f"Системные метрики: память={process.memory_info().rss / 1024 / 1024:.2f} МБ")
 
-    # Проверка состояния вебхука
     try:
         webhook_info = bot.get_webhook_info()
         logger.info(f"Текущее состояние вебхука: {webhook_info.to_dict()}")
@@ -240,23 +251,19 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Ошибка при получении webhook info: {str(e)}")
 
-    # URL Render-а
     WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}/webhook"
     logger.debug(f"WEBHOOK_URL: {WEBHOOK_URL}")
 
-    # Удаление старого вебхука
     try:
         bot.remove_webhook()
         logger.info("Старый вебхук успешно удален")
     except Exception as e:
         logger.error(f"Ошибка при удалении вебхука: {str(e)}")
 
-    # Установка нового вебхука
     try:
         result = bot.set_webhook(url=WEBHOOK_URL)
         if result:
             logger.info(f"Вебхук успешно установлен: {WEBHOOK_URL}")
-            # Дополнительная проверка после установки
             webhook_info = bot.get_webhook_info()
             logger.debug(f"Проверка после установки: {webhook_info.to_dict()}")
         else:
@@ -265,7 +272,6 @@ if __name__ == "__main__":
         logger.error(f"Ошибка при установке вебхука: {str(e)}")
         raise
 
-    # Запуск Flask
     try:
         logger.info(f"Запуск Flask сервера на 0.0.0.0:{PORT}")
         app.run(host="0.0.0.0", port=int(PORT))
