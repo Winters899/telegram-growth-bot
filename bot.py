@@ -6,7 +6,7 @@ import pendulum
 from flask import Flask, request, jsonify
 from telebot import TeleBot
 from telebot.types import Update
-from telebot.util import escape_markdown  # Исправленный импорт
+from telebot.formatting import escape_markdown # Исправленный импорт
 from telebot.apihelper import ApiTelegramException
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
@@ -249,11 +249,18 @@ def webhook():
             logger.warning("Empty webhook payload", extra={'headers': dict(request.headers)})
             return '', 400
         logger.debug("Webhook received", extra={'payload': raw[:500]})
-        update = Update.de_json(raw)
+        update = Update.de_json(json.loads(raw))
         if not update:
             logger.error("Failed to parse webhook update", extra={'raw': raw[:500]})
             return '', 400
-        logger.info("Processing update", extra={'update_id': update.update_id, 'chat_id': getattr(update.message, 'chat', {}).get('id')})
+        chat_id = None
+if update.message:
+    chat_id = update.message.chat.id
+elif update.callback_query:
+    chat_id = update.callback_query.message.chat.id
+
+logger.info("Processing update", extra={'update_id': update.update_id, 'chat_id': chat_id})
+
         bot.process_new_updates([update])
         return '', 200
     except Exception as e:
