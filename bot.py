@@ -17,11 +17,10 @@ app = Flask(__name__)
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
-    
-keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-start_button = types.KeyboardButton(text="🚀 Начать")
-keyboard.add(start_button)
-bot.send_message(message.chat.id, "Привет! Я простой бот на Render 😎", reply_markup=keyboard)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    start_button = types.KeyboardButton(text="🚀 Начать")
+    keyboard.add(start_button)
+    bot.send_message(message.chat.id, "Привет! Я простой бот на Render 😎", reply_markup=keyboard)
 
 
 # -------------------------
