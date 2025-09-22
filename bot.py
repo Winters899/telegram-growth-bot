@@ -28,13 +28,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Логирование версий библиотек
-logger.debug(f"Версия pyTelegramBotAPI: {pyTelegramBotAPI.__version__}")
+logger.debug(f"Версия pyTelegramBotAPI: {telebot.__version__}")
 logger.debug(f"Версия Flask: {flask.__version__}")
 
 # Проверка переменных окружения
 TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
-PORT = os.getenv("PORT", 5000)
+PORT = os.getenv("PORT", 10000)
 
 logger.debug(f"Переменные окружения: BOT_TOKEN={'<скрыт>' if TOKEN else None}, "
              f"RENDER_EXTERNAL_URL={RENDER_EXTERNAL_URL}, PORT={PORT}")
@@ -90,8 +90,14 @@ logger.debug(f"Загружено {len(emojis)} эмодзи: {emojis}")
 def signal_handler(sig, frame):
     logger.info(f"Получен сигнал завершения: {signal.Signals(sig).name}")
     logger.info("Завершение работы приложения")
-    bot.remove_webhook()
-    logger.info("Вебхук удален перед завершением")
+    try:
+        bot.remove_webhook()
+        logger.info("Вебхук удален перед завершением")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении вебхука перед завершением: {str(e)}")
+    if PSUTIL_AVAILABLE:
+        process = psutil.Process()
+        logger.debug(f"Системные метрики перед завершением: память={process.memory_info().rss / 1024 / 1024:.2f} МБ")
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, signal_handler)
