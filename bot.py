@@ -13,6 +13,10 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 APP_URL = os.environ["WEBHOOK_URL"]
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+bot.remove_webhook()
+success = bot.set_webhook(url=f"{APP_URL}/webhook")
+logging.info(f"Webhook set automatically: {success}")
+
 app = Flask(__name__)
 
 # -------------------------
@@ -68,7 +72,7 @@ def get_keyboard():
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
-    logging.info(f"Received /start from chat {message.chat.id}")  # Добавь этот лог
+    logging.info(f"Received /start from chat {message.chat.id}")
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except Exception as e:
@@ -87,20 +91,17 @@ def start_msg(message):
 def callback_inline(c):
     if c.data == "daily":
         bot.answer_callback_query(c.id)
-        phrase = get_daily_phrase(c.message.chat.id)  # Исправлено: get_daily → get_daily_phrase
+        phrase = get_daily_phrase(c.message.chat.id)
         text = f"📅 <b>Совет на сегодня:</b>\n\n{phrase}"
-
     elif c.data == "random":
         bot.answer_callback_query(c.id)
-        phrase = get_random_phrase(c.message.chat.id)  # Предполагается, что get_random корректен
+        phrase = get_random_phrase(c.message.chat.id)
         text = f"💡 <b>Совет:</b>\n\n{phrase}"
-
     else:
         return
 
-    kb = get_keyboard()  # Исправлено: keyboard → get_keyboard
+    kb = get_keyboard()
 
-    # Обновляем сообщение, если текст изменился
     if c.message.text != text:
         try:
             bot.edit_message_text(
@@ -113,25 +114,16 @@ def callback_inline(c):
         except:
             bot.send_message(c.message.chat.id, text, reply_markup=kb)
     else:
-        # Только всплывашка, без дубля
         bot.answer_callback_query(c.id, "Совет дня уже выдан ✅")
 
     logging.info(f"User {c.message.chat.id} получил: {phrase}")
-    
-# -------------------------
-# Route для webhook
-# -------------------------
-# ... (код до webhook)
 
+# -------------------------
+# Маршруты
+# -------------------------
 @app.route("/", methods=["GET", "HEAD"])
 def index():
     return "Bot is running", 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    # ... (твой код webhook)
-
-# ... (остальной код)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -153,22 +145,15 @@ def webhook():
         logging.error(f"Error processing webhook: {e}")
     return "ok", 200
 
-# -------------------------
-# Ручная установка вебхука
-# -------------------------
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     bot.remove_webhook()
     success = bot.set_webhook(url=f"{APP_URL}/webhook")
     return f"Webhook set: {success}", 200
-    
+
 # -------------------------
-# Запуск Flask + автоустановка вебхука
+# Запуск Flask (для локального тестирования)
 # -------------------------
 if __name__ == "__main__":
-    bot.remove_webhook()
-    success = bot.set_webhook(url=f"{APP_URL}/webhook")
-    logging.info(f"Webhook set automatically: {success}")
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
