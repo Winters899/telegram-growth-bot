@@ -4,6 +4,7 @@ from flask import Flask, request
 from telebot import types
 import random
 import logging
+from datetime import date
 
 # -------------------------
 # Настройки
@@ -20,24 +21,33 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------------------------
-# Загрузка фраз из файла
+# Загрузка советов из файла
 # -------------------------
 try:
     with open("phrases.txt", "r", encoding="utf-8") as f:
         content = f.read()
     phrases = [p.strip() for p in content.split('---') if p.strip()]
     if not phrases:
-        phrases = ["Файл пуст! Добавь фразы через ---"]
+        phrases = ["Файл пуст! Добавь советы через ---"]
 except FileNotFoundError:
-    phrases = ["Файл с фразами не найден! Добавь phrases.txt в проект."]
+    phrases = ["Файл с советами не найден! Добавь phrases.txt в проект."]
 
 # -------------------------
-# Исключение повторов
+# Хранилище советов дня
 # -------------------------
+daily_phrase = {}
 last_phrase = {}
 
-def get_phrase(chat_id):
-    global last_phrase
+def get_daily_phrase(chat_id):
+    """Фиксированный совет дня для конкретного чата"""
+    today = str(date.today())
+    if daily_phrase.get(chat_id, {}).get("date") != today:
+        phrase = random.choice(phrases)
+        daily_phrase[chat_id] = {"date": today, "phrase": phrase}
+    return daily_phrase[chat_id]["phrase"]
+
+def get_random_phrase(chat_id):
+    """Дополнительный совет без повторов"""
     available = [p for p in phrases if p != last_phrase.get(chat_id)]
     phrase = random.choice(available) if available else random.choice(phrases)
     last_phrase[chat_id] = phrase
@@ -54,12 +64,13 @@ def start_msg(message):
         pass  
 
     keyboard = types.InlineKeyboardMarkup()
-    start_button = types.InlineKeyboardButton(text="🚀 Получить мотивацию", callback_data="motivation")
-    keyboard.add(start_button)
+    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
+    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
+    keyboard.add(day_button, again_button)
     
     bot.send_message(
         message.chat.id,
-        "Привет! Я бот мотивации 😎\nНажми кнопку ниже, чтобы получить мотивацию:",
+        "Привет! Я бот советов на каждый день 🌞\n\nВыбери, что хочешь получить:",
         reply_markup=keyboard
     )
 
@@ -68,27 +79,36 @@ def start_msg(message):
 # -------------------------
 @bot.callback_query_handler(func=lambda call: True)
 def callback_inline(call):
-    if call.data == "motivation":
+    if call.data == "daily":
         bot.answer_callback_query(call.id)
-        phrase = get_phrase(call.message.chat.id)
+        phrase = get_daily_phrase(call.message.chat.id)
+        text = f"📅 <b>Совет на сегодня:</b>\n\n{phrase}"
 
-        keyboard = types.InlineKeyboardMarkup()
-        again_button = types.InlineKeyboardButton(text="🚀 Еще мотивация", callback_data="motivation")
-        share_button = types.InlineKeyboardButton(text="✨ Поделиться", switch_inline_query=phrase[:50])
-        keyboard.add(again_button, share_button)
+    elif call.data == "random":
+        bot.answer_callback_query(call.id)
+        phrase = get_random_phrase(call.message.chat.id)
+        text = f"💡 <b>Дополнительный совет:</b>\n\n{phrase}"
 
-        try:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=phrase,
-                reply_markup=keyboard,
-                disable_web_page_preview=True
-            )
-        except Exception:
-            bot.send_message(call.message.chat.id, phrase, reply_markup=keyboard)
+    else:
+        return
 
-        logging.info(f"User {call.message.chat.id} получил фразу: {phrase}")
+    keyboard = types.InlineKeyboardMarkup()
+    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
+    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
+    keyboard.add(day_button, again_button)
+
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+    except Exception:
+        bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
+
+    logging.info(f"User {call.message.chat.id} получил совет: {phrase}")
 
 # -------------------------
 # Route для webhook
