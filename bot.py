@@ -32,8 +32,10 @@ try:
 except FileNotFoundError:
     phrases = ["Файл с советами не найден! Добавь phrases.txt в проект."]
 
+logging.info(f"Загружено {len(phrases)} советов")
+
 # -------------------------
-# Хранилище советов дня
+# Хранилище советов
 # -------------------------
 daily_phrase = {}
 last_phrase = {}
@@ -53,6 +55,14 @@ def get_random_phrase(chat_id):
     last_phrase[chat_id] = phrase
     return phrase
 
+def get_keyboard():
+    """Единая клавиатура для всех сообщений"""
+    keyboard = types.InlineKeyboardMarkup()
+    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
+    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
+    keyboard.add(day_button, again_button)
+    return keyboard
+
 # -------------------------
 # Хэндлер команды /start
 # -------------------------
@@ -63,15 +73,10 @@ def start_msg(message):
     except:
         pass  
 
-    keyboard = types.InlineKeyboardMarkup()
-    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
-    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
-    keyboard.add(day_button, again_button)
-    
     bot.send_message(
         message.chat.id,
         "Привет! Я бот советов на каждый день 🌞\n\nВыбери, что хочешь получить:",
-        reply_markup=keyboard
+        reply_markup=get_keyboard()
     )
 
 # -------------------------
@@ -92,25 +97,23 @@ def callback_inline(call):
     else:
         return
 
-    keyboard = types.InlineKeyboardMarkup()
-    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
-    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
-    keyboard.add(day_button, again_button)
-    
-try:
-    # проверяем, отличается ли текст от текущего
-    if call.message.text != text:
-        (
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            reply_markup=keyboard,
-            disable_web_page_preview=True
-        )
-    else:
-        bot.answer_callback_query(call.id, "Совет дня уже выдан ✅")
-except telebot.apihelper.ApiTelegramException:
-    bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
+    keyboard = get_keyboard()
+
+    try:
+        # обновляем сообщение, если текст изменился
+        if call.message.text != text:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=text,
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
+        else:
+            bot.answer_callback_query(call.id, "Совет дня уже выдан ✅")
+    except telebot.apihelper.ApiTelegramException:
+        # если не удалось отредактировать (например, старое сообщение) — отправляем новое
+        bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
 
     logging.info(f"User {call.message.chat.id} получил совет: {phrase}")
 
@@ -136,8 +139,12 @@ def set_webhook():
     return f"Webhook set: {success}", 200
 
 # -------------------------
-# Запуск Flask
+# Запуск Flask + автоустановка вебхука
 # -------------------------
 if __name__ == "__main__":
+    bot.remove_webhook()
+    success = bot.set_webhook(url=f"{APP_URL}/webhook")
+    logging.info(f"Webhook set automatically: {success}")
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
