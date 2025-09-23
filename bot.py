@@ -28,6 +28,12 @@ except FileNotFoundError:
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
+    # удаляем команду
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass  
+
     keyboard = types.InlineKeyboardMarkup()
     start_button = types.InlineKeyboardButton(text="🚀 Получить мотивацию", callback_data="motivation")
     keyboard.add(start_button)
