@@ -121,6 +121,18 @@ def callback_inline(c):
 # -------------------------
 # Route для webhook
 # -------------------------
+# ... (код до webhook)
+
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    return "Bot is running", 200
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    # ... (твой код webhook)
+
+# ... (остальной код)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     json_str = request.get_data(as_text=True)
