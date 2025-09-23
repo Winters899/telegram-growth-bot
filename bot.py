@@ -124,23 +124,6 @@ def callback_inline(c):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     json_str = request.get_data(as_text=True)
-    logging.info(f"Webhook received: {json_str}")  # Добавь этот лог
-    if not json_str:
-        logging.warning("Empty webhook data")
-        return "empty", 200
-    update = telebot.types.Update.de_json(json_str)
-    if update:
-        bot.process_new_updates([update])
-    else:
-        logging.error("Failed to parse update")
-    return "ok", 200
-
-# -------------------------
-# Ручная установка вебхука
-# -------------------------
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    json_str = request.get_data(as_text=True)
     logging.info(f"Webhook received: {json_str}")
     if not json_str:
         logging.warning("Empty webhook data")
@@ -155,6 +138,16 @@ def webhook():
     except Exception as e:
         logging.error(f"Error processing webhook: {e}")
     return "ok", 200
+
+# -------------------------
+# Ручная установка вебхука
+# -------------------------
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    bot.remove_webhook()
+    success = bot.set_webhook(url=f"{APP_URL}/webhook")
+    return f"Webhook set: {success}", 200
+    
 # -------------------------
 # Запуск Flask + автоустановка вебхука
 # -------------------------
