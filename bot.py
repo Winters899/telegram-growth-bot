@@ -1,5 +1,6 @@
 import os
 import telebot
+from flask import Flask, request
 from telebot import types
 import random
 import logging
@@ -9,9 +10,12 @@ from datetime import date
 # Настройки
 # -------------------------
 TOKEN = os.environ["TELEGRAM_TOKEN"]
+APP_URL = os.environ["WEBHOOK_URL"]
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 bot.remove_webhook()  # Удаляем вебхук для поллинга
+
+app = Flask(__name__)
 
 # -------------------------
 # Логирование
