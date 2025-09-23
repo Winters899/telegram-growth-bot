@@ -10,15 +10,18 @@ import random
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 APP_URL = os.environ["WEBHOOK_URL"]
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
 # -------------------------
 # Загрузка фраз из файла
 # -------------------------
-with open("phrases.txt", "r", encoding="utf-8") as f:
-    content = f.read()
-phrases = [p.strip() for p in content.split('---') if p.strip()]
+try:
+    with open("phrases.txt", "r", encoding="utf-8") as f:
+        content = f.read()
+    phrases = [p.strip() for p in content.split('---') if p.strip()]
+except FileNotFoundError:
+    phrases = ["Файл с фразами не найден! Добавь phrases.txt в проект."]
 
 # -------------------------
 # Хэндлер команды /start
@@ -43,16 +46,20 @@ def callback_inline(call):
     if call.data == "motivation":
         bot.answer_callback_query(call.id)
         phrase = random.choice(phrases)
-        # Меняем текст существующего сообщения
         keyboard = types.InlineKeyboardMarkup()
-        start_button = types.InlineKeyboardButton(text="🚀 Еще мотивация", callback_data="motivation")
-        keyboard.add(start_button)
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=phrase,
-            reply_markup=keyboard
-        )
+        again_button = types.InlineKeyboardButton(text="🚀 Еще мотивация", callback_data="motivation")
+        keyboard.add(again_button)
+        try:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=phrase,
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            # если фраза та же или сообщение уже изменено
+            bot.send_message(call.message.chat.id, phrase, reply_markup=keyboard)
 
 # -------------------------
 # Route для webhook
@@ -65,13 +72,16 @@ def webhook():
     return "ok", 200
 
 # -------------------------
-# Установка webhook при старте
+# Ручная установка вебхука
 # -------------------------
-bot.remove_webhook()
-bot.set_webhook(url=f"{APP_URL}/webhook")
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    bot.remove_webhook()
+    success = bot.set_webhook(url=f"{APP_URL}/webhook")
+    return f"Webhook set: {success}", 200
 
 # -------------------------
-# Запуск Flask на Render
+# Запуск Flask
 # -------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
