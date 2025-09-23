@@ -164,9 +164,12 @@ def set_webhook():
     success = bot.set_webhook(url=f"{APP_URL}/webhook")
     return f"Webhook set: {success}", 200
 
+
 # -------------------------
-# Запуск Flask (для локального тестирования)
+# Запуск поллинга
 # -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    logging.info("Starting polling")
+    bot.infinity_polling()
+
+
