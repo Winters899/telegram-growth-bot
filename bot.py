@@ -96,17 +96,21 @@ def callback_inline(call):
     day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
     again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
     keyboard.add(day_button, again_button)
-
-    try:
-        bot.edit_message_text(
+    
+try:
+    # проверяем, отличается ли текст от текущего
+    if call.message.text != text:
+        (
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             text=text,
             reply_markup=keyboard,
             disable_web_page_preview=True
         )
-    except Exception:
-        bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
+    else:
+        bot.answer_callback_query(call.id, "Совет дня уже выдан ✅")
+except telebot.apihelper.ApiTelegramException:
+    bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
 
     logging.info(f"User {call.message.chat.id} получил совет: {phrase}")
 
