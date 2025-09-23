@@ -86,20 +86,20 @@ def start_msg(message):
 def callback_inline(c):
     if c.data == "daily":
         bot.answer_callback_query(c.id)
-        phrase = get_daily(c.message.chat.id)
+        phrase = get_daily_phrase(c.message.chat.id)  # Исправлено: get_daily → get_daily_phrase
         text = f"📅 <b>Совет на сегодня:</b>\n\n{phrase}"
 
     elif c.data == "random":
         bot.answer_callback_query(c.id)
-        phrase = get_random(c.message.chat.id)
+        phrase = get_random_phrase(c.message.chat.id)  # Предполагается, что get_random корректен
         text = f"💡 <b>Совет:</b>\n\n{phrase}"
 
     else:
         return
 
-    kb = keyboard()
+    kb = get_keyboard()  # Исправлено: keyboard → get_keyboard
 
-    # обновляем сообщение, если текст изменился
+    # Обновляем сообщение, если текст изменился
     if c.message.text != text:
         try:
             bot.edit_message_text(
@@ -112,11 +112,11 @@ def callback_inline(c):
         except:
             bot.send_message(c.message.chat.id, text, reply_markup=kb)
     else:
-        # только всплывашка, без дубля
+        # Только всплывашка, без дубля
         bot.answer_callback_query(c.id, "Совет дня уже выдан ✅")
 
     logging.info(f"User {c.message.chat.id} получил: {phrase}")
-
+    
 # -------------------------
 # Route для webhook
 # -------------------------
