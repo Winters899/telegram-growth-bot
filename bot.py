@@ -1,6 +1,5 @@
 import os
 import telebot
-from flask import Flask, request
 from telebot import types
 import random
 import logging
@@ -10,14 +9,9 @@ from datetime import date
 # Настройки
 # -------------------------
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-APP_URL = os.environ["WEBHOOK_URL"]
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-bot.remove_webhook()
-success = bot.set_webhook(url=f"{APP_URL}/webhook")
-logging.info(f"Webhook set automatically: {success}")
-
-app = Flask(__name__)
+bot.remove_webhook()  # Удаляем вебхук для поллинга
 
 # -------------------------
 # Логирование
@@ -119,54 +113,8 @@ def callback_inline(c):
     logging.info(f"User {c.message.chat.id} получил: {phrase}")
 
 # -------------------------
-# Маршруты
-# -------------------------
-@app.route("/", methods=["GET", "HEAD"])
-def index():
-    return "Bot is running", 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        content_type = request.headers.get("Content-Type")
-        logging.info(f"Content-Type: {content_type}")
-        if content_type != "application/json":
-            logging.error(f"Invalid Content-Type: {content_type}")
-            return "invalid content type", 400
-        json_str = request.get_data(as_text=True)
-        logging.info(f"Raw webhook data: {json_str}")
-        if not json_str:
-            logging.warning("Empty webhook data received")
-            return "empty", 200
-        try:
-            update = telebot.types.Update.de_json(json_str)
-            if update:
-                logging.info(f"Update parsed successfully")
-                if update.message:
-                    logging.info(f"Message content: {update.message.text} from chat {update.message.chat.id}")
-                    if update.message.text == "/start":
-                        logging.info(f"Processing /start for chat {update.message.chat.id}")
-                else:
-                    logging.info("No message in update")
-                bot.process_new_updates([update])
-            else:
-                logging.error("Failed to parse update: Update is None")
-        except Exception as e:
-            logging.error(f"Error parsing update: {e}", exc_info=True)
-        return "ok", 200
-    except Exception as e:
-        logging.error(f"Error in webhook: {e}", exc_info=True)
-        return "error", 500
-
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    bot.remove_webhook()
-    success = bot.set_webhook(url=f"{APP_URL}/webhook")
-    return f"Webhook set: {success}", 200
-
-# -------------------------
-# Запуск Flask
+# Запуск поллинга
 # -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    logging.info("Starting polling")
+    bot.infinity_polling()
