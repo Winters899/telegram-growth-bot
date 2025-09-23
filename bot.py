@@ -137,7 +137,10 @@ def set_webhook():
     bot.remove_webhook()
     success = bot.set_webhook(url=f"{APP_URL}/webhook")
     return f"Webhook set: {success}", 200
-
+    
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    return "Bot is running", 200
 # -------------------------
 # Запуск Flask + автоустановка вебхука
 # -------------------------
