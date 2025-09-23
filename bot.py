@@ -123,10 +123,15 @@ def callback_inline(c):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     json_str = request.get_data(as_text=True)
+    logging.info(f"Webhook received: {json_str}")  # Добавь этот лог
     if not json_str:
+        logging.warning("Empty webhook data")
         return "empty", 200
     update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
+    if update:
+        bot.process_new_updates([update])
+    else:
+        logging.error("Failed to parse update")
     return "ok", 200
 
 # -------------------------
