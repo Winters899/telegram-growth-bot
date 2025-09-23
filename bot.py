@@ -144,6 +144,8 @@ def webhook():
         update = telebot.types.Update.de_json(json_str)
         if update:
             logging.info(f"Update parsed: {update}")
+            if update.message and update.message.text == "/start":
+                logging.info(f"Processing /start for chat {update.message.chat.id}")
             bot.process_new_updates([update])
         else:
             logging.error("Failed to parse update")
