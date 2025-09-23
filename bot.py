@@ -128,6 +128,11 @@ def index():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
+        content_type = request.headers.get("Content-Type")
+        logging.info(f"Content-Type: {content_type}")
+        if content_type != "application/json":
+            logging.error(f"Invalid Content-Type: {content_type}")
+            return "invalid content type", 400
         json_str = request.get_data(as_text=True)
         logging.info(f"Raw webhook data: {json_str}")
         if not json_str:
