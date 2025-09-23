@@ -127,27 +127,31 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    json_str = request.get_data(as_text=True)
-    logging.info(f"Webhook received: {json_str}")
-    if not json_str:
-        logging.warning("Empty webhook data")
-        return "empty", 200
     try:
-        update = telebot.types.Update.de_json(json_str)
-        if update:
-            logging.info(f"Update parsed: {update.to_json()}")
-            if update.message:
-                logging.info(f"Message content: {update.message.text} from chat {update.message.chat.id}")
-                if update.message.text == "/start":
-                    logging.info(f"Processing /start for chat {update.message.chat.id}")
+        json_str = request.get_data(as_text=True)
+        logging.info(f"Raw webhook data: {json_str}")
+        if not json_str:
+            logging.warning("Empty webhook data received")
+            return "empty", 200
+        try:
+            update = telebot.types.Update.de_json(json_str)
+            if update:
+                logging.info(f"Update parsed successfully")
+                if update.message:
+                    logging.info(f"Message content: {update.message.text} from chat {update.message.chat.id}")
+                    if update.message.text == "/start":
+                        logging.info(f"Processing /start for chat {update.message.chat.id}")
+                else:
+                    logging.info("No message in update")
+                bot.process_new_updates([update])
             else:
-                logging.info("No message in update")
-            bot.process_new_updates([update])
-        else:
-            logging.error("Failed to parse update")
+                logging.error("Failed to parse update: Update is None")
+        except Exception as e:
+            logging.error(f"Error parsing update: {e}", exc_info=True)
+        return "ok", 200
     except Exception as e:
-        logging.error(f"Error processing webhook: {e}", exc_info=True)
-    return "ok", 200
+        logging.error(f"Error in webhook: {e}", exc_info=True)
+        return "error", 500
 
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
