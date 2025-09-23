@@ -68,16 +68,17 @@ def get_keyboard():
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
+    logging.info(f"Received /start from chat {message.chat.id}")  # Добавь этот лог
     try:
         bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass  
-
+    except Exception as e:
+        logging.error(f"Failed to delete message: {e}")
     bot.send_message(
         message.chat.id,
         "Привет! Я бот советов на каждый день 🌞\n\nВыбери, что хочешь получить:",
         reply_markup=get_keyboard()
     )
+    logging.info(f"Sent response to /start for chat {message.chat.id}")
 
 # -------------------------
 # Хэндлер нажатий на inline-кнопки
@@ -137,15 +138,23 @@ def webhook():
 # -------------------------
 # Ручная установка вебхука
 # -------------------------
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    bot.remove_webhook()
-    success = bot.set_webhook(url=f"{APP_URL}/webhook")
-    return f"Webhook set: {success}", 200
-    
-@app.route("/", methods=["GET", "HEAD"])
-def index():
-    return "Bot is running", 200
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    json_str = request.get_data(as_text=True)
+    logging.info(f"Webhook received: {json_str}")
+    if not json_str:
+        logging.warning("Empty webhook data")
+        return "empty", 200
+    try:
+        update = telebot.types.Update.de_json(json_str)
+        if update:
+            logging.info(f"Update parsed: {update}")
+            bot.process_new_updates([update])
+        else:
+            logging.error("Failed to parse update")
+    except Exception as e:
+        logging.error(f"Error processing webhook: {e}")
+    return "ok", 200
 # -------------------------
 # Запуск Flask + автоустановка вебхука
 # -------------------------
