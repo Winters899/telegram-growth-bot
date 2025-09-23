@@ -82,40 +82,40 @@ def start_msg(message):
 # -------------------------
 # Хэндлер нажатий на inline-кнопки
 # -------------------------
-@bot.callback_query_handler(func=lambda call: True)
-def callback_inline(call):
-    if call.data == "daily":
-        bot.answer_callback_query(call.id)
-        phrase = get_daily_phrase(call.message.chat.id)
+@bot.callback_query_handler(func=lambda c: True)
+def callback_inline(c):
+    if c.data == "daily":
+        bot.answer_callback_query(c.id)
+        phrase = get_daily(c.message.chat.id)
         text = f"📅 <b>Совет на сегодня:</b>\n\n{phrase}"
 
-    elif call.data == "random":
-        bot.answer_callback_query(call.id)
-        phrase = get_random_phrase(call.message.chat.id)
-        text = f"💡 <b>Дополнительный совет:</b>\n\n{phrase}"
+    elif c.data == "random":
+        bot.answer_callback_query(c.id)
+        phrase = get_random(c.message.chat.id)
+        text = f"💡 <b>Совет:</b>\n\n{phrase}"
 
     else:
         return
 
-    keyboard = get_keyboard()
+    kb = keyboard()
 
-    try:
-        # обновляем сообщение, если текст изменился
-        if call.message.text != text:
+    # обновляем сообщение, если текст изменился
+    if c.message.text != text:
+        try:
             bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
+                chat_id=c.message.chat.id,
+                message_id=c.message.message_id,
                 text=text,
-                reply_markup=keyboard,
+                reply_markup=kb,
                 disable_web_page_preview=True
             )
-        else:
-            bot.answer_callback_query(call.id, "Совет дня уже выдан ✅")
-    except telebot.apihelper.ApiTelegramException:
-        # если не удалось отредактировать (например, старое сообщение) — отправляем новое
-        bot.send_message(call.message.chat.id, text, reply_markup=keyboard)
+        except:
+            bot.send_message(c.message.chat.id, text, reply_markup=kb)
+    else:
+        # только всплывашка, без дубля
+        bot.answer_callback_query(c.id, "Совет дня уже выдан ✅")
 
-    logging.info(f"User {call.message.chat.id} получил совет: {phrase}")
+    logging.info(f"User {c.message.chat.id} получил: {phrase}")
 
 # -------------------------
 # Route для webhook
