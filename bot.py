@@ -10,11 +10,9 @@ from datetime import date
 # Настройки
 # -------------------------
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-APP_URL = os.environ["WEBHOOK_URL"]
+APP_URL = os.environ["WEBHOOK_URL"].rstrip("/")  # убираем лишний / если есть
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-bot.remove_webhook()  # Удаляем вебхук для поллинга
-
 app = Flask(__name__)
 
 # -------------------------
@@ -43,7 +41,6 @@ daily_phrase = {}
 last_phrase = {}
 
 def get_daily_phrase(chat_id):
-    """Фиксированный совет дня для конкретного чата"""
     today = str(date.today())
     if daily_phrase.get(chat_id, {}).get("date") != today:
         phrase = random.choice(phrases)
@@ -51,14 +48,12 @@ def get_daily_phrase(chat_id):
     return daily_phrase[chat_id]["phrase"]
 
 def get_random_phrase(chat_id):
-    """Дополнительный совет без повторов"""
     available = [p for p in phrases if p != last_phrase.get(chat_id)]
     phrase = random.choice(available) if available else random.choice(phrases)
     last_phrase[chat_id] = phrase
     return phrase
 
 def get_keyboard():
-    """Единая клавиатура для всех сообщений"""
     keyboard = types.InlineKeyboardMarkup()
     day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
     again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
@@ -66,7 +61,7 @@ def get_keyboard():
     return keyboard
 
 # -------------------------
-# Хэндлер команды /start
+# Хэндлер /start
 # -------------------------
 @bot.message_handler(commands=['start'])
 def start_msg(message):
@@ -83,7 +78,7 @@ def start_msg(message):
     logging.info(f"Sent response to /start for chat {message.chat.id}")
 
 # -------------------------
-# Хэндлер нажатий на inline-кнопки
+# Хэндлер inline-кнопок
 # -------------------------
 @bot.callback_query_handler(func=lambda c: True)
 def callback_inline(c):
@@ -99,7 +94,6 @@ def callback_inline(c):
         return
 
     kb = get_keyboard()
-
     if c.message.text != text:
         try:
             bot.edit_message_text(
@@ -117,8 +111,24 @@ def callback_inline(c):
     logging.info(f"User {c.message.chat.id} получил: {phrase}")
 
 # -------------------------
-# Запуск поллинга
+# Flask эндпоинты
+# -------------------------
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Бот работает!", 200
+
+# -------------------------
+# Запуск
 # -------------------------
 if __name__ == "__main__":
-    logging.info("Starting polling")
-    bot.infinity_polling()
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
+    logging.info(f"Webhook установлен: {APP_URL}/{TOKEN}")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
