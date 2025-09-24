@@ -10,11 +10,11 @@ from flask import Flask, request
 # -------------------------
 # Настройки
 # -------------------------
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
 APP_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 
-if not TOKEN:
-    raise RuntimeError("❌ Не задан TELEGRAM_TOKEN")
+if not TOKEN or not APP_URL:
+    raise ValueError("❌ TELEGRAM_TOKEN и WEBHOOK_URL должны быть заданы!")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
@@ -77,8 +77,8 @@ def send_or_edit(c, text: str):
             reply_markup=kb,
             disable_web_page_preview=True,
         )
-    except Exception:
-        bot.send_message(c.message.chat.id, text, reply_markup=kb)
+    except Exception as e:
+        logging.warning(f"Не удалось отредактировать сообщение: {e}")
 
 # -------------------------
 # Хэндлеры
@@ -113,9 +113,9 @@ def callback_inline(c):
     logging.info(f"Пользователь {c.message.chat.id} получил совет: {phrase}")
 
 # -------------------------
-# Flask эндпоинты (для webhook)
+# Flask эндпоинты
 # -------------------------
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = telebot.types.Update.de_json(request.data.decode("utf-8"))
     bot.process_new_updates([update])
@@ -126,16 +126,11 @@ def index():
     return "Бот работает!", 200
 
 # -------------------------
-# Запуск
+# Запуск приложения
 # -------------------------
 if __name__ == "__main__":
-    if APP_URL:  # режим webhook (сервер)
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{APP_URL}/webhook/{TOKEN}")
-        logging.info(f"✅ Webhook установлен: {APP_URL}/webhook/{TOKEN}")
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port, debug=False)
-    else:  # режим polling (локально)
-        logging.info("▶ Запуск в режиме polling (локально)")
-        bot.remove_webhook()
-        bot.infinity_polling(skip_pending=True)
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
+    logging.info(f"✅ Webhook установлен: {APP_URL}/{TOKEN}")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
