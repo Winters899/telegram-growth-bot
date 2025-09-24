@@ -43,6 +43,7 @@ logging.info(f"Загружено {len(phrases)} советов")
 # -------------------------
 daily_phrase = {}
 last_phrase = {}
+last_update_id = None   # ✅ защита от повторов
 
 # -------------------------
 # Функции
@@ -117,7 +118,15 @@ def callback_inline(c):
 # -------------------------
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
+    global last_update_id
     update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+
+    # ✅ защита от повторной обработки
+    if last_update_id == update.update_id:
+        logging.warning("Пропущен дубликат update_id")
+        return "duplicate", 200
+
+    last_update_id = update.update_id
     bot.process_new_updates([update])
     return "ok", 200
 
