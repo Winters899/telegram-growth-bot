@@ -10,7 +10,7 @@ from datetime import date, datetime
 # Настройки
 # -------------------------
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-APP_URL = os.environ["WEBHOOK_URL"].rstrip("/")  # убираем лишний / если есть
+APP_URL = os.environ["WEBHOOK_URL"].rstrip("/")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
@@ -21,7 +21,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------------------------
-# Загрузка советов из файла
+# Загрузка советов
 # -------------------------
 try:
     with open("phrases.txt", "r", encoding="utf-8") as f:
@@ -55,9 +55,10 @@ def get_random_phrase(chat_id):
 
 def get_keyboard():
     keyboard = types.InlineKeyboardMarkup()
-    day_button = types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily")
-    again_button = types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random")
-    keyboard.add(day_button, again_button)
+    keyboard.add(
+        types.InlineKeyboardButton(text="📅 Совет дня", callback_data="daily"),
+        types.InlineKeyboardButton(text="💡 Новый совет", callback_data="random"),
+    )
     return keyboard
 
 # -------------------------
@@ -75,7 +76,6 @@ def start_msg(message):
         "Привет! Я бот советов на каждый день 🌞\n\nВыбери, что хочешь получить:",
         reply_markup=get_keyboard()
     )
-    logging.info(f"Sent response to /start for chat {message.chat.id}")
 
 # -------------------------
 # Хэндлер inline-кнопок
@@ -113,7 +113,8 @@ def callback_inline(c):
 # -------------------------
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode("utf-8")
+    json_str = request.stream.read().decode("utf-8")
+    logging.info(f"Update received: {json_str}")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
     return "ok", 200
@@ -126,5 +127,5 @@ def index():
 # Устанавливаем вебхук при запуске
 # -------------------------
 bot.remove_webhook()
-bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
+bot.set_webhook(url=f"{APP_URL}/{TOKEN}", timeout=60)
 logging.info(f"Webhook установлен: {APP_URL}/{TOKEN}")
