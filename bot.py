@@ -131,4 +131,6 @@ if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
     logging.info(f"Webhook установлен: {APP_URL}/{TOKEN}")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+    port = int(os.environ.get("PORT", 10000))  # Render требует PORT или 10000
+    app.run(host="0.0.0.0", port=port)
