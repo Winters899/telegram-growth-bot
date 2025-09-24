@@ -1,51 +1,123 @@
 import os
+import random
 import logging
-from flask import Flask, request
+from datetime import date, datetime
+
 import telebot
+from telebot import types
+from flask import Flask, request
+
+# -------------------------
+# Настройки
+# -------------------------
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+APP_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+
+if not TOKEN or not APP_URL:
+    raise ValueError("❌ TELEGRAM_TOKEN и WEBHOOK_URL должны быть заданы!")
+
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+app = Flask(__name__)
 
 # -------------------------
 # Логирование
 # -------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------------------------
-# Конфигурация
+# Загрузка советов
 # -------------------------
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-APP_URL = os.environ.get("WEBHOOK_URL")  # https://telegram-growth-bot-lrkb.onrender.com
+try:
+    with open("phrases.txt", "r", encoding="utf-8") as f:
+        phrases = [p.strip() for p in f.read().split('---') if p.strip()]
+except FileNotFoundError:
+    phrases = []
 
-if not TOKEN or not APP_URL:
-    raise ValueError("❌ Укажи TELEGRAM_TOKEN и WEBHOOK_URL в переменных окружения!")
+if not phrases:
+    phrases = ["Советы не найдены. Добавь файл phrases.txt с советами через '---'"]
 
-bot = telebot.TeleBot(TOKEN, threaded=False)
-app = Flask(__name__)
+logging.info(f"Загружено {len(phrases)} советов")
 
 # -------------------------
-# Хэндлеры бота
+# Хранилище
+# -------------------------
+daily_phrase = {}
+last_phrase = {}
+
+# -------------------------
+# Функции
+# -------------------------
+def get_keyboard() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("📅 Совет дня", callback_data="daily"),
+        types.InlineKeyboardButton("💡 Новый совет", callback_data="random"),
+    )
+    return kb
+
+def get_daily_phrase(chat_id: int) -> str:
+    today = str(date.today())
+    if daily_phrase.get(chat_id, {}).get("date") != today:
+        daily_phrase[chat_id] = {"date": today, "phrase": random.choice(phrases)}
+    return daily_phrase[chat_id]["phrase"]
+
+def get_random_phrase(chat_id: int) -> str:
+    available = [p for p in phrases if p != last_phrase.get(chat_id)]
+    phrase = random.choice(available or phrases)
+    last_phrase[chat_id] = phrase
+    return phrase
+
+def send_or_edit(c, text: str):
+    kb = get_keyboard()
+    try:
+        bot.edit_message_text(
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        bot.send_message(c.message.chat.id, text, reply_markup=kb)
+
+# -------------------------
+# Хэндлеры
 # -------------------------
 @bot.message_handler(commands=["start"])
-def start_handler(message):
-    bot.reply_to(message, "Привет 👋 Бот работает через Render!")
+def start_msg(message):
+    logging.info(f"/start от {message.chat.id}")
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+    bot.send_message(
+        message.chat.id,
+        "Привет! Я бот советов 🌞\n\nВыбери опцию:",
+        reply_markup=get_keyboard(),
+    )
 
-@bot.message_handler(commands=["help"])
-def help_handler(message):
-    bot.reply_to(message, "Я простой бот. Доступные команды: /start, /help")
-
-@bot.message_handler(func=lambda m: True)
-def echo_handler(message):
-    bot.reply_to(message, f"Ты написал: {message.text}")
+@bot.callback_query_handler(func=lambda c: True)
+def callback_inline(c):
+    if c.data == "daily":
+        phrase = get_daily_phrase(c.message.chat.id)
+        today = datetime.now().strftime("%d.%m.%Y")
+        text = f"📅 <b>Совет на сегодня ({today}):</b>\n\n{phrase}"
+        bot.answer_callback_query(c.id, "Сегодняшний совет ✅", show_alert=False)
+    elif c.data == "random":
+        phrase = get_random_phrase(c.message.chat.id)
+        text = f"💡 <b>Совет:</b>\n\n{phrase}"
+        bot.answer_callback_query(c.id, "Новый совет 🌟", show_alert=False)
+    else:
+        return
+    send_or_edit(c, text)
+    logging.info(f"Пользователь {c.message.chat.id} получил совет: {phrase}")
 
 # -------------------------
 # Flask эндпоинты
 # -------------------------
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode("utf-8")
-    logging.info(f"📩 Update received: {json_str}")
-    update = telebot.types.Update.de_json(json_str)
+    update = telebot.types.Update.de_json(request.data.decode("utf-8"))
     bot.process_new_updates([update])
     return "ok", 200
 
@@ -53,22 +125,12 @@ def webhook():
 def index():
     return "Бот работает!", 200
 
-@app.route("/healthz", methods=["GET"])
-def health():
-    return "ok", 200
-
 # -------------------------
-# Запуск
+# Запуск приложения
 # -------------------------
 if __name__ == "__main__":
-    # Устанавливаем вебхук (обновляем всегда)
     bot.remove_webhook()
-    success = bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
-    if success:
-        logging.info(f"✅ Webhook установлен: {APP_URL}/{TOKEN}")
-    else:
-        logging.error("❌ Ошибка установки вебхука")
-
-    port = int(os.environ.get("PORT", 10000))
-    logging.info(f"🚀 Flask сервер запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port)
+    bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
+    logging.info(f"✅ Webhook установлен: {APP_URL}/{TOKEN}")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
