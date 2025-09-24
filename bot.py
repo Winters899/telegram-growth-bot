@@ -4,7 +4,7 @@ from flask import Flask, request
 from telebot import types
 import random
 import logging
-from datetime import date
+from datetime import date, datetime
 
 # -------------------------
 # Настройки
@@ -83,30 +83,28 @@ def start_msg(message):
 @bot.callback_query_handler(func=lambda c: True)
 def callback_inline(c):
     if c.data == "daily":
-        bot.answer_callback_query(c.id)
         phrase = get_daily_phrase(c.message.chat.id)
-        text = f"📅 <b>Совет на сегодня:</b>\n\n{phrase}"
+        today_str = datetime.now().strftime("%d.%m.%Y")
+        text = f"📅 <b>Совет на сегодня ({today_str}):</b>\n\n{phrase}"
+        bot.answer_callback_query(c.id, "Сегодняшний совет уже выдан ✅", show_alert=False)
     elif c.data == "random":
-        bot.answer_callback_query(c.id)
         phrase = get_random_phrase(c.message.chat.id)
         text = f"💡 <b>Совет:</b>\n\n{phrase}"
+        bot.answer_callback_query(c.id, "Получен новый совет 🌟", show_alert=False)
     else:
         return
 
     kb = get_keyboard()
-    if c.message.text != text:
-        try:
-            bot.edit_message_text(
-                chat_id=c.message.chat.id,
-                message_id=c.message.message_id,
-                text=text,
-                reply_markup=kb,
-                disable_web_page_preview=True
-            )
-        except:
-            bot.send_message(c.message.chat.id, text, reply_markup=kb)
-    else:
-        bot.answer_callback_query(c.id, "Совет дня уже выдан ✅")
+    try:
+        bot.edit_message_text(
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True
+        )
+    except:
+        bot.send_message(c.message.chat.id, text, reply_markup=kb)
 
     logging.info(f"User {c.message.chat.id} получил: {phrase}")
 
