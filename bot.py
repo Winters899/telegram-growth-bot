@@ -10,11 +10,11 @@ from flask import Flask, request
 # -------------------------
 # Настройки
 # -------------------------
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 APP_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 
-if not TOKEN or not APP_URL:
-    raise ValueError("❌ TELEGRAM_TOKEN и WEBHOOK_URL должны быть заданы!")
+if not TOKEN:
+    raise RuntimeError("❌ Не задан TELEGRAM_TOKEN")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
@@ -43,7 +43,6 @@ logging.info(f"Загружено {len(phrases)} советов")
 # -------------------------
 daily_phrase = {}
 last_phrase = {}
-last_update_id = None   # ✅ защита от повторов
 
 # -------------------------
 # Функции
@@ -114,19 +113,11 @@ def callback_inline(c):
     logging.info(f"Пользователь {c.message.chat.id} получил совет: {phrase}")
 
 # -------------------------
-# Flask эндпоинты
+# Flask эндпоинты (для webhook)
 # -------------------------
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    global last_update_id
     update = telebot.types.Update.de_json(request.data.decode("utf-8"))
-
-    # ✅ защита от повторной обработки
-    if last_update_id == update.update_id:
-        logging.warning("Пропущен дубликат update_id")
-        return "duplicate", 200
-
-    last_update_id = update.update_id
     bot.process_new_updates([update])
     return "ok", 200
 
@@ -135,11 +126,16 @@ def index():
     return "Бот работает!", 200
 
 # -------------------------
-# Запуск приложения
+# Запуск
 # -------------------------
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
-    logging.info(f"✅ Webhook установлен: {APP_URL}/{TOKEN}")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    if APP_URL:  # режим webhook (сервер)
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{APP_URL}/webhook/{TOKEN}")
+        logging.info(f"✅ Webhook установлен: {APP_URL}/webhook/{TOKEN}")
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port, debug=False)
+    else:  # режим polling (локально)
+        logging.info("▶ Запуск в режиме polling (локально)")
+        bot.remove_webhook()
+        bot.infinity_polling(skip_pending=True)
