@@ -4,7 +4,7 @@ from waitress import serve
 from bot import app, bot, TOKEN, APP_URL
 
 if __name__ == "__main__":
-    bot.remove_webhook()
+    bot.delete_webhook(drop_pending_updates=True)
     bot.set_webhook(url=f"{APP_URL}/{TOKEN}")
     logging.info(f"✅ Webhook установлен: {APP_URL}/{TOKEN}")
     port = int(os.environ.get("PORT", 5000))
